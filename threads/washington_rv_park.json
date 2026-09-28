@@ -1,0 +1,76 @@
+{
+  "thread_id": "washington_rv_park",
+  "type": "acquisition",
+  "stage": "pre_site_visit",
+  "objective": "Determine whether the team should continue pursuing the Washington RV park acquisition.",
+  "participants": [
+    "Brian",
+    "Joey",
+    "Li"
+  ],
+  "known_facts": [
+    "Brian and Joey are evaluating an RV park opportunity in Washington state.",
+    "A site visit is planned.",
+    "Joey, Brian, and Li are the participants evaluating the deal.",
+    "Joey and Li are affiliated with Cratus Asset.",
+    "Utility setup (water/sewer vs. septic/well), electrical pedestal condition, and seller motivation are unconfirmed as of this conversation.",
+    "Permitting and zoning constraints on expansion are unconfirmed as of this conversation."
+  ],
+  "open_questions": [
+    {
+      "question": "What is the utility setup — municipal water/sewer hookups or septic/well?",
+      "resolved": false
+    },
+    {
+      "question": "Could the existing utility infrastructure support expansion?",
+      "resolved": false
+    },
+    {
+      "question": "What is the condition of the electrical pedestals?",
+      "resolved": false
+    },
+    {
+      "question": "Is there urgency or flexibility on the seller's side regarding terms?",
+      "resolved": false
+    },
+    {
+      "question": "Are there permitting or zoning constraints that would affect expansion?",
+      "resolved": false
+    },
+    {
+      "question": "What are Brian's key risk flags and deal-killers for this opportunity?",
+      "resolved": false
+    }
+  ],
+  "decisions": [],
+  "action_items": [
+    {
+      "item": "Share key risk flags and deal-killers ahead of the site visit",
+      "owner": "Brian",
+      "status": "open"
+    },
+    {
+      "item": "Build out a full site visit walkthrough checklist once Brian shares his risk priorities",
+      "owner": "Li",
+      "status": "open"
+    }
+  ],
+  "new_information": [],
+  "history": [
+    {
+      "run": 1,
+      "date": "2026-08-14",
+      "summary": "Joey and Li surfaced key pre-visit unknowns and proposed a checklist approach, pending Brian's input on risk priorities.",
+      "questions_raised": [
+        "What is the utility setup — municipal water/sewer hookups or septic/well?",
+        "Could the existing utility infrastructure support expansion?",
+        "What is the condition of the electrical pedestals?",
+        "Is there urgency or flexibility on the seller's side regarding terms?",
+        "Are there permitting or zoning constraints that would affect expansion?",
+        "What are Brian's key risk flags and deal-killers for this opportunity?"
+      ],
+      "decisions_made": [],
+      "new_information_processed": []
+    }
+  ]
+}

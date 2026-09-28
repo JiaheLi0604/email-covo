@@ -1,0 +1,313 @@
+{
+  "conversation_flow": ["bot_a", "bot_b"],
+  "conversation_rounds": 4,
+  "subject": "***Cratus*** New Deal Update",
+
+  "flow_selection": {
+    "mode": "manual",
+    "flow_templates": [
+      ["bot_c", "bot_b", "bot_a"],
+      ["bot_b", "bot_c", "bot_a"],
+      ["bot_a", "bot_b", "bot_c"],
+      ["bot_c", "bot_a", "bot_b"],
+      ["bot_b", "bot_a", "bot_c"],
+      ["bot_c", "bot_b", "bot_a", "bot_b"],
+      ["bot_b", "bot_c", "bot_a", "bot_b"],
+      ["bot_a", "bot_b", "bot_c", "bot_b"],
+      ["bot_c", "bot_a", "bot_b", "bot_a"],
+      ["bot_b", "bot_a", "bot_c", "bot_a"]
+    ],
+    "random_rounds": {
+      "enabled": true,
+      "min": 3,
+      "max": 3
+    }
+  },
+
+  "conversation_mode": "deal",
+  "active_threads": ["sequim_tiny_home_village"],
+
+  "dry_run": false,
+  "debug": true,
+  "inbox_timeout_seconds": 60,
+
+  "reply_delay_seconds": {
+    "enabled": true,
+    "min": 15,
+    "max": 30
+  },
+
+  "schedule": {
+    "enabled": true,
+    "day": "mon-fri",
+    "timezone": "America/New_York",
+    "runs_per_day": { "min": 2, "max": 3 },
+    "window": { "start": "10:00", "end": "17:00" },
+    "min_gap_minutes": 90
+  },
+
+  "company_memory": {
+    "people": {
+      "jennifer": {
+        "name": "Jennifer",
+        "role": "NorWin Campground Manager",
+        "relationships": { "spouse": "Paul" }
+      },
+      "paul": {
+        "name": "Paul",
+        "role": "Hejamada Campground Manager",
+        "relationships": { "spouse": "Jennifer" }
+      }
+    },
+    "campgrounds": {
+      "norwin": {
+        "manager": "Jennifer",
+        "known_facts": [
+          "The campground recently replaced its Wi-Fi system with Starlink.",
+          "The café was damaged by a fallen tree and needs to be rebuilt."
+        ]
+      },
+      "hejamada": {
+        "manager": "Paul",
+        "known_facts": []
+      }
+    }
+  },
+
+  "event_library": [
+    {
+      "id": "heavy_rain",
+      "title": "Heavy Rain",
+      "category": "weather",
+      "description": "Heavy rain is forecast or has occurred at the campground.",
+      "severity": "medium",
+      "possible_discussion_points": [
+        "site flooding risk",
+        "drainage issues",
+        "guest cancellations",
+        "outdoor event impact",
+        "road or path conditions"
+      ]
+    },
+    {
+      "id": "pool_maintenance",
+      "title": "Pool Maintenance",
+      "category": "maintenance",
+      "description": "The pool requires scheduled or unscheduled maintenance.",
+      "severity": "low",
+      "possible_discussion_points": [
+        "closure duration",
+        "guest communication",
+        "contractor availability",
+        "inspection status"
+      ]
+    },
+    {
+      "id": "guest_complaint",
+      "title": "Guest Complaint",
+      "category": "guest_experience",
+      "description": "A guest has filed a formal complaint about their stay.",
+      "severity": "medium",
+      "possible_discussion_points": [
+        "nature of complaint",
+        "resolution offered",
+        "refund or compensation",
+        "pattern recognition",
+        "staff response"
+      ]
+    },
+    {
+      "id": "water_leak",
+      "title": "Water Leak",
+      "category": "maintenance",
+      "description": "A water leak has been identified on the property.",
+      "severity": "high",
+      "possible_discussion_points": [
+        "location and severity",
+        "repair cost estimate",
+        "water shutoff impact",
+        "affected sites",
+        "contractor timeline"
+      ]
+    },
+    {
+      "id": "occupancy_increase",
+      "title": "Occupancy Increase",
+      "category": "operations",
+      "description": "Occupancy has risen above recent average.",
+      "severity": "low",
+      "possible_discussion_points": [
+        "contributing factors",
+        "staffing adequacy",
+        "revenue impact",
+        "supply readiness"
+      ]
+    },
+    {
+      "id": "occupancy_decrease",
+      "title": "Occupancy Decrease",
+      "category": "operations",
+      "description": "Occupancy has dropped below recent average.",
+      "severity": "medium",
+      "possible_discussion_points": [
+        "contributing factors",
+        "booking trends",
+        "marketing response",
+        "rate adjustment",
+        "seasonal context"
+      ]
+    },
+    {
+      "id": "holiday_weekend",
+      "title": "Holiday Weekend",
+      "category": "operations",
+      "description": "An upcoming holiday weekend is expected to drive high demand.",
+      "severity": "low",
+      "possible_discussion_points": [
+        "staffing levels",
+        "site availability",
+        "supply inventory",
+        "guest communication",
+        "peak pricing"
+      ]
+    },
+
+    {
+      "id": "website_update",
+      "title": "Website Update",
+      "category": "marketing",
+      "description": "NorWin Campground's new website is ready to publish. Li is currently uploading additional photos. There are a few small bugs that still need to be fixed before the site goes live.",
+      "severity": "medium",
+      "possible_discussion_points": [
+        "publish timeline",
+        "photo upload progress",
+        "bug fixes blocking launch",
+        "who reviews before going live",
+        "communication to guests after launch"
+      ]
+    },
+    {
+      "id": "marketing_campaign",
+      "title": "Marketing Campaign",
+      "category": "marketing",
+      "description": "A marketing campaign is planned or in progress.",
+      "severity": "low",
+      "possible_discussion_points": [
+        "target audience",
+        "budget",
+        "expected reach",
+        "results tracking"
+      ]
+    },
+    {
+      "id": "rate_adjustment",
+      "title": "Rate Adjustment",
+      "category": "revenue",
+      "description": "Site rates are being reviewed or adjusted.",
+      "severity": "medium",
+      "possible_discussion_points": [
+        "rationale",
+        "competitive benchmarking",
+        "guest reaction risk",
+        "revenue impact",
+        "effective date"
+      ]
+    },
+    {
+      "id": "water_bar_replacement",
+      "title": "Water Bar Replacement",
+      "category": "maintenance",
+      "description": "The NorWin water bar needs to be replaced.",
+      "severity": "high",
+      "possible_discussion_points": [
+        "replacement cost",
+        "vendor options",
+        "timeline",
+        "guest impact",
+        "temporary workaround"
+      ]
+    },
+    {
+      "id": "cafe_rebuild",
+      "title": "Café Rebuild",
+      "category": "infrastructure",
+      "description": "NorWin's café was damaged by a fallen tree and needs to be rebuilt.",
+      "severity": "low",
+      "possible_discussion_points": [
+        "insurance claim status",
+        "contractor selection",
+        "rebuild cost and timeline",
+        "temporary food service options",
+        "guest communication"
+      ]
+    },
+    {
+      "id": "starlink_performance",
+      "title": "Starlink Performance Issue",
+      "category": "infrastructure",
+       "description": "NorWin recently switched its internet service to Starlink. The internet connection is working normally, and the intercom successfully registers with the VoIP server. However, voice calls cannot be established. Current troubleshooting suggests the issue is likely related to Starlink's CGNAT or public IP limitations rather than the gateway firewall or intercom hardware.",
+      "severity": "high",
+       "possible_discussion_points": [
+        "VoIP call failures",
+        "Starlink CGNAT limitations",
+        "Public IP availability",
+        "Inbound vs. outbound traffic",
+        "Intercom vendor troubleshooting",
+        "Alternative network configurations",
+        "Testing and verification",
+        "Operational impact on campground communication"
+
+  ]
+    }
+  ],
+
+  "event_selection": {
+    "mode": "manual",
+    "min_events": 1,
+    "max_events": 2
+  },
+
+  "weekly_context": {
+    "campground": "NorWin Campground",
+    "reporting_period": "current week",
+    "metrics": {
+      "guest_complaints": 1,
+      "weekend_weather": "Sunny"
+    },
+    "active_events": [
+      "website_update"
+    ],
+    "recent_updates": [
+      "NorWin's new website is ready to publish. Li is uploading additional photos and there are a few small bugs to fix before launch."
+    ]
+  },
+
+  "teams": {
+    "chat_id": "19:e2c97e8aa78846e295978dea0fbd2a6b@thread.v2"
+  },
+
+  "bot_a": {
+    "name": "Li",
+    "email": "kli@cratusasset.com",
+    "transport": "outlook",
+    "role": "intern",
+    "style": "clear, concise, analytical",
+    "template": "bot_a"
+  },
+  "bot_b": {
+    "name": "Brian",
+    "email": "kli@ecesis.ai",
+    "transport": "outlook",
+    "role": "Manager",
+    "style": "direct, decision-focused, asks about priorities and next steps",
+    "template": "bot_b"
+  },
+  "bot_c": {
+    "name": "Joey Wan",
+    "email": "joeywan@cratusasset.com",
+    "transport": "outlook",
+    "role": "Operations team member",
+    "style": "practical, operational, reports what happened and flags issues",
+    "template": "bot_c"
+  }
+}

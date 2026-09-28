@@ -1,0 +1,8 @@
+token_bot_a.json
+token_bot_b.json
+token_bot_c.json
+run_log.json
+__pycache__/
+*.pyc
+.env
+.DS_Store

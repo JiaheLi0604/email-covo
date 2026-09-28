@@ -1,0 +1,31 @@
+{
+  "weekly_topic": "The main shower block (Block C) has low water pressure reported by three guests this morning. Determine the cause and agree on a repair plan before the weekend peak.",
+  "subject": "Urgent: Block C Shower Pressure Issue",
+  "conversation_rounds": 2,
+
+  "dry_run": true,
+  "debug": false,
+
+  "schedule": {
+    "enabled": false,
+    "day": "monday",
+    "time": "09:00",
+    "mode": "weekly",
+    "run_after_seconds": 120
+  },
+
+  "bot_a": {
+    "name": "Jamie (Maintenance)",
+    "email": "zhongrenhanart@gmail.com",
+    "role": "Maintenance Coordinator",
+    "style": "technical, methodical — describes the problem clearly and proposes a fix with timeline",
+    "template": "bot_a"
+  },
+  "bot_b": {
+    "name": "Morgan (Manager)",
+    "email": "testbotuno1@gmail.com",
+    "role": "Campground Manager",
+    "style": "decisive and guest-focused — asks what guests need to know and when the fix will be done",
+    "template": "bot_b"
+  }
+}

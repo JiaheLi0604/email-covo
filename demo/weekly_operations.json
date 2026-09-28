@@ -1,0 +1,31 @@
+{
+  "weekly_topic": "Discuss this week's campground operations updates and identify any follow-up tasks.",
+  "subject": "Weekly Operations Check-in",
+  "conversation_rounds": 2,
+
+  "dry_run": true,
+  "debug": false,
+
+  "schedule": {
+    "enabled": false,
+    "day": "monday",
+    "time": "09:00",
+    "mode": "weekly",
+    "run_after_seconds": 120
+  },
+
+  "bot_a": {
+    "name": "Alex (Ops)",
+    "email": "zhongrenhanart@gmail.com",
+    "role": "Operations Coordinator",
+    "style": "clear, concise, professional — surfaces issues early and flags decisions needed",
+    "template": "bot_a"
+  },
+  "bot_b": {
+    "name": "Morgan (Manager)",
+    "email": "testbotuno1@gmail.com",
+    "role": "Campground Manager",
+    "style": "practical and direct — asks for the next concrete action or decision",
+    "template": "bot_b"
+  }
+}

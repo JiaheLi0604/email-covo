@@ -1,0 +1,31 @@
+2026-08-10 22:12:29 [INFO] Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-08-10 22:12:29 [INFO] Scheduler started. Conversation will run on mon-fri at 10:00 America/New_York (+random 0–60 min). Press Ctrl+C to stop.
+2026-08-10 22:12:29 [INFO] Added job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter)" to job store "default"
+2026-08-10 22:12:29 [INFO] Scheduler started
+2026-08-11 22:10:07 [INFO] Running job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-11 10:10:07 EDT)" (scheduled at 2026-08-11 10:10:07.019314-04:00)
+2026-08-11 22:10:07 [INFO] Scheduled job fired — loading config and starting conversation.
+2026-08-11 22:10:12 [INFO] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 403 Forbidden"
+2026-08-11 22:10:12 [INFO] Job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-12 10:59:21 EDT)" executed successfully
+2026-08-12 22:59:21 [INFO] Running job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-13 10:07:04 EDT)" (scheduled at 2026-08-12 10:59:21.469548-04:00)
+2026-08-12 22:59:21 [INFO] Scheduled job fired — loading config and starting conversation.
+2026-08-12 22:59:29 [INFO] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 403 Forbidden"
+2026-08-12 22:59:29 [INFO] Job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-13 10:07:04 EDT)" executed successfully
+2026-08-14 19:05:28 [WARNING] Run time of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-14 10:46:24 EDT)" was missed by 20:58:24.065667
+2026-08-14 22:46:24 [INFO] Running job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-17 10:04:56 EDT)" (scheduled at 2026-08-14 10:46:24.009267-04:00)
+2026-08-14 22:46:24 [INFO] Scheduled job fired — loading config and starting conversation.
+2026-08-14 22:46:28 [INFO] HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 403 Forbidden"
+2026-08-14 22:46:28 [INFO] Job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-17 10:04:56 EDT)" executed successfully
+2026-08-24 20:45:16 [WARNING] Run time of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-24 10:41:43 EDT)" was missed by 2 days, 22:14:29.125429
+2026-08-24 22:41:43 [INFO] Running job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-25 10:32:30 EDT)" (scheduled at 2026-08-24 10:41:43.731397-04:00)
+2026-08-24 22:41:43 [INFO] Scheduled job fired — loading config and starting conversation.
+2026-08-25 22:32:30 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-25 10:32:30 EDT)" skipped: maximum number of running instances reached (1)
+2026-08-27 20:01:25 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-26 10:55:58 EDT)" skipped: maximum number of running instances reached (1)
+2026-08-27 22:51:55 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-27 10:51:55 EDT)" skipped: maximum number of running instances reached (1)
+2026-08-28 22:28:20 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-28 10:28:19 EDT)" skipped: maximum number of running instances reached (1)
+2026-09-01 19:26:51 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-08-31 10:57:01 EDT)" skipped: maximum number of running instances reached (1)
+2026-09-01 22:26:39 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-09-01 10:26:39 EDT)" skipped: maximum number of running instances reached (1)
+2026-09-03 07:45:57 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-09-02 10:17:36 EDT)" skipped: maximum number of running instances reached (1)
+2026-09-04 17:08:08 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-09-03 10:39:45 EDT)" skipped: maximum number of running instances reached (1)
+2026-09-07 22:40:38 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-09-07 10:54:26 EDT)" skipped: maximum number of running instances reached (1)
+2026-09-09 09:02:33 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-09-08 10:32:15 EDT)" skipped: maximum number of running instances reached (1)
+2026-09-09 14:41:37 [WARNING] Execution of job "Conversation — mon-fri at 10:00 America/New_York (+60min jitter) (trigger: cron[day_of_week='mon-fri', hour='10', minute='0'], next run at: 2026-09-09 10:12:42 EDT)" skipped: maximum number of running instances reached (1)

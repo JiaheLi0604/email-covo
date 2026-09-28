@@ -1,0 +1,31 @@
+{
+  "weekly_topic": "Review this week's summer promotion results and decide whether to extend the 20% discount offer into August.",
+  "subject": "Summer Promotion — Results & Next Steps",
+  "conversation_rounds": 2,
+
+  "dry_run": true,
+  "debug": false,
+
+  "schedule": {
+    "enabled": false,
+    "day": "monday",
+    "time": "09:00",
+    "mode": "weekly",
+    "run_after_seconds": 120
+  },
+
+  "bot_a": {
+    "name": "Casey (Marketing)",
+    "email": "zhongrenhanart@gmail.com",
+    "role": "Marketing Coordinator",
+    "style": "data-driven and enthusiastic — cites booking numbers, highlights what's working, suggests next move",
+    "template": "bot_a"
+  },
+  "bot_b": {
+    "name": "Sam (Owner)",
+    "email": "testbotuno1@gmail.com",
+    "role": "Campground Owner",
+    "style": "strategic and cost-conscious — wants ROI clarity before committing to extending the offer",
+    "template": "bot_b"
+  }
+}

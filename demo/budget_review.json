@@ -1,0 +1,31 @@
+{
+  "weekly_topic": "Review June operating expenses — utilities came in 18% over budget. Identify the main drivers and agree on two cost-reduction actions for July.",
+  "subject": "June Budget Review — Overspend on Utilities",
+  "conversation_rounds": 2,
+
+  "dry_run": true,
+  "debug": false,
+
+  "schedule": {
+    "enabled": false,
+    "day": "monday",
+    "time": "09:00",
+    "mode": "weekly",
+    "run_after_seconds": 120
+  },
+
+  "bot_a": {
+    "name": "Riley (Finance)",
+    "email": "zhongrenhanart@gmail.com",
+    "role": "Finance Coordinator",
+    "style": "precise and analytical — breaks down numbers, explains what drove the variance, recommends specific cuts",
+    "template": "bot_a"
+  },
+  "bot_b": {
+    "name": "Sam (Owner)",
+    "email": "testbotuno1@gmail.com",
+    "role": "Campground Owner",
+    "style": "bottom-line focused — wants two concrete actions with expected savings, not a long list of options",
+    "template": "bot_b"
+  }
+}
