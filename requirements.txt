@@ -1,5 +1,5 @@
 flask
 msal
 requests
-anthropoc
+anthropic
 apscheduler
