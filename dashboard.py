@@ -22,6 +22,7 @@ Deploy to Railway/Render:
 import json
 import os
 import random
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -185,6 +186,8 @@ def api_save_config():
 
 @app.route("/api/threads")
 def api_threads():
+    cfg = _load_config()
+    active_set = set(cfg.get("active_threads", []))
     out = []
     for tid in _list_thread_ids():
         try:
@@ -198,6 +201,7 @@ def api_threads():
                 "open_actions":   sum(1 for a in t.get("action_items",   []) if a.get("status") == "open"),
                 "last_run_summary":  t.get("last_run_summary", ""),
                 "discussion_focus":  t.get("discussion_focus", ""),
+                "is_active":      tid in active_set,
             })
         except Exception:
             pass
@@ -219,6 +223,82 @@ def api_add_info(tid):
     t.setdefault("new_information", []).append(info)
     _save_thread(tid, t)
     return jsonify({"ok": True})
+
+@app.route("/api/threads/<tid>", methods=["DELETE"])
+def api_delete_thread(tid):
+    path = THREADS_DIR / f"{tid}.json"
+    if path.exists():
+        path.unlink()
+    cfg = _load_config()
+    cfg["active_threads"] = [t for t in cfg.get("active_threads", []) if t != tid]
+    _save_config(cfg)
+    return jsonify({"ok": True})
+
+@app.route("/api/threads/active", methods=["POST"])
+def api_set_active():
+    tids = (request.get_json() or {}).get("active_threads", [])
+    cfg = _load_config()
+    cfg["active_threads"] = tids
+    _save_config(cfg)
+    return jsonify({"ok": True})
+
+@app.route("/api/threads/new", methods=["POST"])
+def api_new_thread():
+    import anthropic as _ant
+    d    = request.get_json() or {}
+    name = d.get("name", "").strip()
+    content = d.get("content", "").strip()
+    if not name or not content:
+        return jsonify({"error": "name and content required"}), 400
+
+    tid = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    if (THREADS_DIR / f"{tid}.json").exists():
+        return jsonify({"error": f"Thread '{tid}' already exists"}), 409
+
+    prompt = f"""You are analyzing a real estate deal listing. Extract structured information and return a JSON object with EXACTLY these fields:
+
+{{
+  "thread_id": "{tid}",
+  "stage": "initial_review",
+  "discussion_focus": "<one sentence describing the main focus>",
+  "last_run_summary": "",
+  "known_facts": ["<fact1>", "<fact2>", ...],
+  "open_questions": [{{"question": "<question>", "resolved": false}}, ...],
+  "action_items": [{{"item": "<action>", "owner": "<Li|Brian|Joey Wan>", "status": "open"}}, ...],
+  "decisions": [],
+  "new_information": [],
+  "history": []
+}}
+
+Extract 5-15 known facts, 3-8 open questions, 2-5 action items. Return ONLY valid JSON.
+
+CONTENT:
+{content[:4000]}"""
+
+    client = _ant.Anthropic()
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    raw = msg.content[0].text.strip()
+    raw = re.sub(r"^```(?:json)?\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw)
+
+    try:
+        thread_data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"Parse error: {e}"}), 500
+
+    THREADS_DIR.mkdir(exist_ok=True)
+    _save_thread(tid, thread_data)
+
+    cfg = _load_config()
+    if tid not in cfg.get("active_threads", []):
+        cfg.setdefault("active_threads", []).append(tid)
+        _save_config(cfg)
+
+    return jsonify({"ok": True, "id": tid})
 
 @app.route("/api/threads/<tid>", methods=["PATCH"])
 def api_patch_thread(tid):
@@ -565,7 +645,10 @@ input:checked+.slider:before{transform:translateX(16px)}
 
       <!-- Threads -->
       <div class="card">
-        <div class="card-title">Deal threads</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <div class="card-title" style="margin-bottom:0">Deal threads</div>
+          <button class="btn btn-primary btn-sm" onclick="openNewThread()">+ New thread</button>
+        </div>
         <div id="threadsList"><span style="color:#aaa;font-size:13px">Loading...</span></div>
       </div>
 
@@ -599,6 +682,24 @@ input:checked+.slider:before{transform:translateX(16px)}
         <div id="runLog"><span style="color:#aaa;font-size:13px">Loading...</span></div>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- New thread modal -->
+<div class="detail-overlay" id="newThreadOverlay" onclick="closeNewThreadOverlay(event)">
+  <div class="detail-panel" id="newThreadPanel">
+    <button class="detail-close" onclick="closeNewThread()">✕</button>
+    <h2 style="font-size:17px;font-weight:600;margin-bottom:4px">New deal thread</h2>
+    <p style="font-size:12px;color:#888;margin-bottom:16px">Paste any listing info, due diligence notes, or raw data. Claude will auto-structure it into a thread.</p>
+    <div class="field" style="padding:6px 0;border-bottom:none;margin-bottom:10px">
+      <span class="field-label">Thread name</span>
+      <input type="text" id="newThreadName" placeholder="e.g. Sequim RV Park" style="width:280px">
+    </div>
+    <textarea id="newThreadContent" style="width:100%;min-height:300px;border:1px solid #ddd;border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.6;resize:vertical;outline:none" placeholder="Paste listing URL content, broker notes, property details, financials..."></textarea>
+    <div id="newThreadStatus" style="font-size:12px;color:#888;margin-top:8px;min-height:18px"></div>
+    <div style="text-align:right;margin-top:10px">
+      <button class="btn btn-primary" id="newThreadBtn" onclick="createThread()">Create thread</button>
     </div>
   </div>
 </div>
@@ -689,19 +790,23 @@ function updateStatusBadge(enabled) {
 async function loadThreads() {
   const threads = await fetch('/api/threads').then(r => r.json());
   const el = document.getElementById('threadsList');
-  if (!threads.length) { el.innerHTML = '<span style="color:#aaa;font-size:13px">No threads yet.</span>'; return; }
+  if (!threads.length) { el.innerHTML = '<span style="color:#aaa;font-size:13px">No threads yet. Click "+ New thread" to add one.</span>'; return; }
 
-  // Update stat card
-  if (threads[0]) {
-    document.getElementById('statThreadRun').textContent = `Run ${threads[0].run_count}`;
-  }
+  const active = threads.find(t => t.is_active);
+  if (active) document.getElementById('statThreadRun').textContent = `Run ${active.run_count}`;
 
   el.innerHTML = threads.map(t => `
     <div class="thread-row">
-      <div>
-        <div class="thread-name">${t.name}</div>
-        <div class="thread-meta">${t.stage} · Run ${t.run_count}</div>
-        ${t.discussion_focus ? `<div style="font-size:11px;color:#666;margin-top:3px;max-width:340px;line-height:1.4">${t.discussion_focus}</div>` : ''}
+      <div style="display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0">
+        <label class="toggle" style="margin-top:2px;flex-shrink:0" title="Set active">
+          <input type="checkbox" ${t.is_active ? 'checked' : ''} onchange="toggleActive('${t.id}', this.checked)">
+          <span class="slider"></span>
+        </label>
+        <div style="min-width:0">
+          <div class="thread-name">${t.name}</div>
+          <div class="thread-meta">${t.stage} · Run ${t.run_count}</div>
+          ${t.discussion_focus ? `<div style="font-size:11px;color:#666;margin-top:3px;max-width:300px;line-height:1.4">${t.discussion_focus}</div>` : ''}
+        </div>
       </div>
       <div class="thread-badges">
         ${t.open_questions ? `<span class="badge badge-yellow">${t.open_questions} open Qs</span>` : ''}
@@ -709,6 +814,19 @@ async function loadThreads() {
         <button class="btn btn-sm" onclick="openDetail('${t.id}')">View</button>
       </div>
     </div>`).join('');
+}
+
+async function toggleActive(tid, checked) {
+  const threads = await fetch('/api/threads').then(r => r.json());
+  let active = threads.filter(t => t.is_active).map(t => t.id);
+  if (checked && !active.includes(tid)) active.push(tid);
+  if (!checked) active = active.filter(id => id !== tid);
+  await fetch('/api/threads/active', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({active_threads: active})
+  });
+  loadThreads();
 }
 
 // ---------------------------------------------------------------------------
@@ -789,7 +907,10 @@ function renderDetail() {
     : '';
 
   el.innerHTML = `
-    <h2 style="font-size:17px;font-weight:600;margin-bottom:4px">${esc((t.thread_id||tid).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()))}</h2>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+      <h2 style="font-size:17px;font-weight:600">${esc((t.thread_id||tid).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()))}</h2>
+      <button class="btn btn-sm" style="color:#dc2626;border-color:#fca5a5" onclick="deleteThread('${tid}')">Delete</button>
+    </div>
     <p style="font-size:12px;color:#888;margin-bottom:14px">${esc(t.stage||'')} · Run ${(t.history||[]).length}</p>
 
     ${t.discussion_focus ? `<div class="focus-box">Today's focus: ${esc(t.discussion_focus)}</div>` : ''}
@@ -1057,6 +1178,56 @@ async function savePrompt() {
 
 function closePromptPanel() { document.getElementById('promptOverlay').classList.remove('open'); }
 function closePromptOverlay(e) { if (e.target === document.getElementById('promptOverlay')) closePromptPanel(); }
+
+// ---------------------------------------------------------------------------
+// New thread / delete thread
+// ---------------------------------------------------------------------------
+function openNewThread() {
+  document.getElementById('newThreadName').value = '';
+  document.getElementById('newThreadContent').value = '';
+  document.getElementById('newThreadStatus').textContent = '';
+  document.getElementById('newThreadBtn').disabled = false;
+  document.getElementById('newThreadOverlay').classList.add('open');
+}
+function closeNewThread() { document.getElementById('newThreadOverlay').classList.remove('open'); }
+function closeNewThreadOverlay(e) { if (e.target === document.getElementById('newThreadOverlay')) closeNewThread(); }
+
+async function createThread() {
+  const name    = document.getElementById('newThreadName').value.trim();
+  const content = document.getElementById('newThreadContent').value.trim();
+  if (!name || !content) { alert('Please fill in both the name and content.'); return; }
+
+  const btn = document.getElementById('newThreadBtn');
+  const status = document.getElementById('newThreadStatus');
+  btn.disabled = true;
+  status.textContent = '⏳ Claude is analyzing the content...';
+
+  const res = await fetch('/api/threads/new', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({name, content})
+  });
+  const data = await res.json();
+
+  if (!res.ok) {
+    status.textContent = '❌ ' + (data.error || 'Failed');
+    btn.disabled = false;
+    return;
+  }
+
+  status.textContent = '✓ Thread created!';
+  setTimeout(() => {
+    closeNewThread();
+    loadThreads();
+  }, 800);
+}
+
+async function deleteThread(tid) {
+  if (!confirm('Delete this thread? This cannot be undone.')) return;
+  await fetch(`/api/threads/${tid}`, {method: 'DELETE'});
+  closeDetailPanel();
+  loadThreads();
+}
 
 // ---------------------------------------------------------------------------
 // Start
