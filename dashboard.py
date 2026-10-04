@@ -220,6 +220,19 @@ def api_add_info(tid):
     _save_thread(tid, t)
     return jsonify({"ok": True})
 
+@app.route("/api/threads/<tid>", methods=["PATCH"])
+def api_patch_thread(tid):
+    d = request.get_json() or {}
+    try:
+        t = _load_thread(tid)
+    except FileNotFoundError:
+        return jsonify({"error": "not found"}), 404
+    for field in ["known_facts", "open_questions", "action_items", "decisions", "new_information"]:
+        if field in d:
+            t[field] = d[field]
+    _save_thread(tid, t)
+    return jsonify({"ok": True})
+
 # ---------------------------------------------------------------------------
 # API — schedule
 # ---------------------------------------------------------------------------
@@ -451,6 +464,14 @@ input:checked+.slider:before{transform:translateX(16px)}
 .new-info-area:focus{border-color:#666}
 .focus-box{background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:10px 12px;font-size:13px;color:#1e3a5f;margin-bottom:12px;line-height:1.5}
 .divider{height:1px;background:#f0f0ee;margin:14px 0}
+.edit-row{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:6px;background:#f9f9f7;margin-bottom:4px}
+.edit-row:hover{background:#f0f0ee}
+.edit-text{flex:1;font-size:13px;color:#333;line-height:1.5;min-width:0;word-break:break-word}
+.item-resolved .edit-text{text-decoration:line-through;color:#aaa}
+.icon-btn{border:none;background:none;cursor:pointer;font-size:14px;color:#bbb;padding:0 2px;line-height:1;flex-shrink:0;margin-top:1px}
+.icon-btn:hover{color:#666}
+.icon-btn-green:hover{color:#16a34a}
+.icon-btn-blue:hover{color:#2563eb}
 </style>
 </head>
 <body>
@@ -693,47 +714,111 @@ async function loadThreads() {
 // ---------------------------------------------------------------------------
 // Thread detail
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Thread detail — editable
+// ---------------------------------------------------------------------------
+let _td = null;   // current thread data in memory
+let _tdId = null; // current thread id
+
 async function openDetail(tid) {
-  const t = await fetch(`/api/threads/${tid}`).then(r => r.json());
+  _tdId = tid;
+  _td = await fetch(`/api/threads/${tid}`).then(r => r.json());
+  renderDetail();
+  document.getElementById('detailOverlay').classList.add('open');
+}
+
+function renderDetail() {
+  const t = _td;
+  const tid = _tdId;
   const el = document.getElementById('detailContent');
 
-  const qHtml = (t.open_questions || [])
-    .filter(q => !q.resolved)
-    .map(q => `<div class="q-item">${q.question}</div>`).join('') || '<p style="color:#aaa">None</p>';
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
-  const aHtml = (t.action_items || [])
-    .filter(a => a.status === 'open')
-    .map(a => `<div class="action-item"><div>${a.item}</div><div class="action-owner">→ ${a.owner}</div></div>`).join('') || '<p style="color:#aaa">None</p>';
+  // Known facts
+  const factsHtml = (t.known_facts || []).length
+    ? (t.known_facts).map((f, i) => `
+        <div class="edit-row">
+          <span class="edit-text">${esc(f)}</span>
+          <button class="icon-btn" onclick="deleteFact(${i})" title="Delete">×</button>
+        </div>`).join('')
+    : '<p style="color:#aaa;font-size:13px">None</p>';
 
-  const factsHtml = (t.known_facts || []).map(f => `<li>${f}</li>`).join('');
-  const decisionsHtml = (t.decisions || []).map(d => `<li>${d}</li>`).join('');
-  const newInfoHtml = (t.new_information || []).map(i => `<div class="q-item">${i}</div>`).join('');
+  // Open questions
+  const questionsHtml = (t.open_questions || []).length
+    ? (t.open_questions).map((q, i) => `
+        <div class="edit-row ${q.resolved ? 'item-resolved' : ''}">
+          <span class="edit-text">${esc(q.question)}</span>
+          <div style="display:flex;gap:4px;flex-shrink:0">
+            <button class="icon-btn icon-btn-green" onclick="resolveQuestion(${i})" title="${q.resolved ? 'Unresolve' : 'Mark resolved'}">✓</button>
+            <button class="icon-btn" onclick="deleteQuestion(${i})" title="Delete">×</button>
+          </div>
+        </div>`).join('')
+    : '<p style="color:#aaa;font-size:13px">None</p>';
+
+  // Action items
+  const actionsHtml = (t.action_items || []).length
+    ? (t.action_items).map((a, i) => `
+        <div class="edit-row ${a.status === 'done' ? 'item-resolved' : ''}">
+          <div style="flex:1;min-width:0">
+            <div class="edit-text">${esc(a.item)}</div>
+            <div style="font-size:11px;color:#16a34a;margin-top:2px">→ ${esc(a.owner||'')}</div>
+          </div>
+          <div style="display:flex;gap:4px;flex-shrink:0;align-items:flex-start">
+            <button class="icon-btn icon-btn-blue" onclick="toggleAction(${i})" title="Toggle status">${a.status === 'done' ? '↺' : '✓'}</button>
+            <button class="icon-btn" onclick="deleteAction(${i})" title="Delete">×</button>
+          </div>
+        </div>`).join('')
+    : '<p style="color:#aaa;font-size:13px">None</p>';
+
+  // Decisions
+  const decisionsHtml = (t.decisions || []).length
+    ? (t.decisions).map((d, i) => `
+        <div class="edit-row">
+          <span class="edit-text">${esc(d)}</span>
+          <button class="icon-btn" onclick="deleteDecision(${i})" title="Delete">×</button>
+        </div>`).join('')
+    : '<p style="color:#aaa;font-size:13px">None</p>';
+
+  // New info queue
+  const newInfoHtml = (t.new_information || []).length
+    ? (t.new_information).map((info, i) => `
+        <div class="edit-row">
+          <span class="edit-text" style="color:#555">${esc(info)}</span>
+          <button class="icon-btn" onclick="deleteNewInfo(${i})" title="Delete">×</button>
+        </div>`).join('')
+    : '';
 
   el.innerHTML = `
-    <h2 style="font-size:17px;font-weight:600;margin-bottom:4px">${(t.thread_id||tid).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase())}</h2>
-    <p style="font-size:12px;color:#888;margin-bottom:18px">${t.stage} · Run ${(t.history||[]).length}</p>
+    <h2 style="font-size:17px;font-weight:600;margin-bottom:4px">${esc((t.thread_id||tid).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()))}</h2>
+    <p style="font-size:12px;color:#888;margin-bottom:14px">${esc(t.stage||'')} · Run ${(t.history||[]).length}</p>
 
-    ${t.discussion_focus ? `<div class="focus-box">Today's focus: ${t.discussion_focus}</div>` : ''}
-    ${t.last_run_summary ? `<p style="font-size:13px;color:#555;margin-bottom:16px;line-height:1.6"><em>${t.last_run_summary}</em></p>` : ''}
+    ${t.discussion_focus ? `<div class="focus-box">Today's focus: ${esc(t.discussion_focus)}</div>` : ''}
+    ${t.last_run_summary ? `<p style="font-size:13px;color:#555;margin-bottom:14px;line-height:1.6"><em>${esc(t.last_run_summary)}</em></p>` : ''}
 
     <div class="detail-section">
-      <div class="detail-section-title">Open questions</div>${qHtml}
+      <div class="detail-section-title">Open questions</div>
+      ${questionsHtml}
     </div>
 
     <div class="detail-section">
-      <div class="detail-section-title">Action items</div>${aHtml}
+      <div class="detail-section-title">Action items</div>
+      ${actionsHtml}
     </div>
 
     <div class="detail-section">
       <div class="detail-section-title">Decisions made</div>
-      <ul>${decisionsHtml || '<li style="color:#aaa">None</li>'}</ul>
+      ${decisionsHtml}
     </div>
 
     <div class="divider"></div>
 
     <div class="detail-section">
       <div class="detail-section-title">Known facts</div>
-      <ul>${factsHtml || '<li style="color:#aaa">None</li>'}</ul>
+      ${factsHtml}
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <input type="text" id="newFactInput" placeholder="Add a fact..." style="flex:1;border:1px solid #ddd;border-radius:6px;padding:5px 8px;font-size:12px;outline:none">
+        <button class="btn btn-primary btn-sm" onclick="addFact()">Add</button>
+      </div>
     </div>
 
     ${newInfoHtml ? `<div class="detail-section"><div class="detail-section-title">New information queued</div>${newInfoHtml}</div>` : ''}
@@ -741,29 +826,75 @@ async function openDetail(tid) {
     <div class="divider"></div>
 
     <div class="detail-section">
-      <div class="detail-section-title">Add new information</div>
+      <div class="detail-section-title">Add new information for next run</div>
       <textarea class="new-info-area" id="newInfoText" placeholder="Paste seller reply, new data, or any update here..."></textarea>
       <div style="margin-top:8px;text-align:right">
-        <button class="btn btn-primary" onclick="submitNewInfo('${tid}')">Add to thread</button>
+        <button class="btn btn-primary" onclick="submitNewInfo()">Add to thread</button>
       </div>
     </div>`;
-
-  document.getElementById('detailOverlay').classList.add('open');
 }
 
-async function submitNewInfo(tid) {
+async function _patchThread() {
+  await fetch(`/api/threads/${_tdId}`, {
+    method: 'PATCH',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      known_facts:    _td.known_facts    || [],
+      open_questions: _td.open_questions || [],
+      action_items:   _td.action_items   || [],
+      decisions:      _td.decisions      || [],
+      new_information: _td.new_information || [],
+    })
+  });
+  const msg = document.getElementById('savedMsg');
+  msg.textContent = 'Saved';
+  msg.classList.add('show');
+  setTimeout(() => { msg.classList.remove('show'); msg.textContent = 'Saved'; }, 1800);
+}
+
+function deleteFact(i) {
+  _td.known_facts.splice(i, 1);
+  _patchThread(); renderDetail();
+}
+function addFact() {
+  const inp = document.getElementById('newFactInput');
+  const val = inp.value.trim();
+  if (!val) return;
+  _td.known_facts = _td.known_facts || [];
+  _td.known_facts.push(val);
+  _patchThread(); renderDetail();
+}
+function resolveQuestion(i) {
+  _td.open_questions[i].resolved = !_td.open_questions[i].resolved;
+  _patchThread(); renderDetail();
+}
+function deleteQuestion(i) {
+  _td.open_questions.splice(i, 1);
+  _patchThread(); renderDetail();
+}
+function toggleAction(i) {
+  _td.action_items[i].status = _td.action_items[i].status === 'done' ? 'open' : 'done';
+  _patchThread(); renderDetail();
+}
+function deleteAction(i) {
+  _td.action_items.splice(i, 1);
+  _patchThread(); renderDetail();
+}
+function deleteDecision(i) {
+  _td.decisions.splice(i, 1);
+  _patchThread(); renderDetail();
+}
+function deleteNewInfo(i) {
+  _td.new_information.splice(i, 1);
+  _patchThread(); renderDetail();
+}
+async function submitNewInfo() {
   const info = document.getElementById('newInfoText').value.trim();
   if (!info) return;
-  await fetch(`/api/threads/${tid}/new_info`, {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({info})
-  });
-  document.getElementById('newInfoText').value = '';
-  const msg = document.getElementById('savedMsg');
-  msg.textContent = 'Added';
-  msg.classList.add('show');
-  setTimeout(() => { msg.classList.remove('show'); msg.textContent = 'Saved'; }, 2000);
+  _td.new_information = _td.new_information || [];
+  _td.new_information.push(info);
+  await _patchThread();
+  renderDetail();
 }
 
 function closeDetailPanel() {
