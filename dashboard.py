@@ -28,7 +28,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, request
+from functools import wraps
+
+import msal
+from flask import Flask, Response, jsonify, request
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -39,13 +42,39 @@ CONFIG_FILE = BASE_DIR / "config.json"
 THREADS_DIR = BASE_DIR / "threads"
 RUN_LOG_FILE = BASE_DIR / "run_log.json"
 
+# ---------------------------------------------------------------------------
+# Auth constants (mirrors outlook_service.py)
+# ---------------------------------------------------------------------------
+_MSAL_CLIENT_ID = "3637aa14-8277-4ef6-b28c-fc82f40908f2"
+_MSAL_AUTHORITY = "https://login.microsoftonline.com/common"
+_MSAL_SCOPES    = ["Mail.ReadWrite", "Mail.Send", "User.Read"]
+# Set TOKEN_DIR env var to a Railway Volume mount path (e.g. /data) so
+# tokens survive redeployment.  Falls back to the project directory.
+TOKEN_DIR = Path(os.environ.get("TOKEN_DIR", str(BASE_DIR)))
+
 app = Flask(__name__)
+
+
+@app.before_request
+def _require_password():
+    """HTTP Basic Auth gate.  Set DASHBOARD_PASSWORD env var to enable."""
+    pw = os.environ.get("DASHBOARD_PASSWORD", "")
+    if not pw:
+        return  # no password configured → allow all
+    auth = request.authorization
+    if not auth or auth.password != pw:
+        return Response(
+            "Authentication required.",
+            401,
+            {"WWW-Authenticate": 'Basic realm="Cratus Dashboard"'},
+        )
 
 # ---------------------------------------------------------------------------
 # In-memory run state (reset on process restart)
 # ---------------------------------------------------------------------------
 
-_run_state: dict = {"running": False, "started_at": None, "error": None}
+_run_state: dict  = {"running": False, "started_at": None, "error": None}
+_auth_flows: dict = {}   # bot_id → {status, user_code, verification_uri, ...}
 
 # ---------------------------------------------------------------------------
 # File helpers
@@ -374,6 +403,100 @@ def api_runlog():
 
 
 # ---------------------------------------------------------------------------
+# API — Outlook auth
+# ---------------------------------------------------------------------------
+
+def _check_token_status(bot_id: str) -> str:
+    """Returns 'connected', 'expired', or 'unauthorized'."""
+    token_path = TOKEN_DIR / f"token_{bot_id}.json"
+    if not token_path.exists():
+        return "unauthorized"
+    try:
+        cache = msal.SerializableTokenCache()
+        cache.deserialize(token_path.read_text(encoding="utf-8"))
+        app_obj = msal.PublicClientApplication(
+            _MSAL_CLIENT_ID, authority=_MSAL_AUTHORITY, token_cache=cache
+        )
+        accounts = app_obj.get_accounts()
+        if not accounts:
+            return "unauthorized"
+        result = app_obj.acquire_token_silent(_MSAL_SCOPES, account=accounts[0])
+        if result and "access_token" in result:
+            return "connected"
+        return "expired"
+    except Exception:
+        return "expired"
+
+
+@app.route("/api/auth/<bot_id>/status")
+def api_auth_status(bot_id):
+    if bot_id not in ("bot_a", "bot_b", "bot_c"):
+        return jsonify({"error": "invalid bot"}), 400
+    flow   = _auth_flows.get(bot_id, {})
+    return jsonify({
+        "token_status": _check_token_status(bot_id),
+        "flow_status":  flow.get("status", "idle"),
+    })
+
+
+@app.route("/api/auth/<bot_id>/start", methods=["POST"])
+def api_auth_start(bot_id):
+    if bot_id not in ("bot_a", "bot_b", "bot_c"):
+        return jsonify({"error": "invalid bot"}), 400
+
+    # Return existing code if a flow is already running
+    existing = _auth_flows.get(bot_id, {})
+    if existing.get("status") == "polling":
+        return jsonify({
+            "user_code":        existing["user_code"],
+            "verification_uri": existing["verification_uri"],
+            "message":          existing.get("message", ""),
+        })
+
+    cache   = msal.SerializableTokenCache()
+    app_obj = msal.PublicClientApplication(
+        _MSAL_CLIENT_ID, authority=_MSAL_AUTHORITY, token_cache=cache
+    )
+    flow = app_obj.initiate_device_flow(scopes=_MSAL_SCOPES)
+
+    if "user_code" not in flow:
+        return jsonify({
+            "error": "Failed to start device code flow. Make sure 'Allow public client flows' is ON in Azure."
+        }), 500
+
+    token_path = TOKEN_DIR / f"token_{bot_id}.json"
+
+    _auth_flows[bot_id] = {
+        "status":           "polling",
+        "user_code":        flow["user_code"],
+        "verification_uri": flow.get("verification_uri", "https://microsoft.com/devicelogin"),
+        "message":          flow.get("message", ""),
+    }
+
+    def _poll():
+        try:
+            result = app_obj.acquire_token_by_device_flow(flow)
+            if "access_token" in result:
+                TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+                token_path.write_text(cache.serialize(), encoding="utf-8")
+                _auth_flows[bot_id]["status"] = "connected"
+            else:
+                _auth_flows[bot_id]["status"] = "failed"
+        except Exception as exc:
+            _auth_flows[bot_id]["status"] = "failed"
+            _auth_flows[bot_id]["error"]  = str(exc)
+
+    threading.Thread(target=_poll, daemon=True).start()
+
+    return jsonify({
+        "user_code":        flow["user_code"],
+        "verification_uri": flow.get("verification_uri", "https://microsoft.com/devicelogin"),
+        "message":          flow.get("message", ""),
+        "expires_in":       flow.get("expires_in", 900),
+    })
+
+
+# ---------------------------------------------------------------------------
 # API — bots / prompts
 # ---------------------------------------------------------------------------
 
@@ -552,6 +675,13 @@ input:checked+.slider:before{transform:translateX(16px)}
 .icon-btn:hover{color:#666}
 .icon-btn-green:hover{color:#16a34a}
 .icon-btn-blue:hover{color:#2563eb}
+
+/* auth badges */
+.auth-badge{font-size:11px;padding:2px 7px;border-radius:20px;font-weight:500;display:inline-block}
+.auth-connected{background:#dcfce7;color:#166534}
+.auth-expired{background:#fef3c7;color:#92400e}
+.auth-unauth{background:#fee2e2;color:#991b1b}
+.auth-pending{background:#dbeafe;color:#1e40af}
 </style>
 </head>
 <body>
@@ -712,6 +842,24 @@ input:checked+.slider:before{transform:translateX(16px)}
   </div>
 </div>
 
+<!-- Auth modal -->
+<div class="detail-overlay" id="authOverlay" onclick="closeAuthOverlay(event)">
+  <div class="detail-panel" style="width:440px;height:auto;min-height:300px">
+    <button class="detail-close" onclick="closeAuth()">✕</button>
+    <h2 style="font-size:17px;font-weight:600;margin-bottom:6px" id="authTitle">Authorize Outlook</h2>
+    <p style="font-size:12px;color:#888;margin-bottom:16px">Sign in to Microsoft so this bot can send and receive emails via Outlook.</p>
+    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin-bottom:14px">
+      <p style="font-size:13px;font-weight:600;margin-bottom:6px">Step 1</p>
+      <p style="font-size:13px;margin-bottom:12px">Open <a href="https://microsoft.com/devicelogin" target="_blank" style="color:#2563eb;font-weight:600">microsoft.com/devicelogin</a> in a browser</p>
+      <p style="font-size:13px;font-weight:600;margin-bottom:4px">Step 2 — Enter this code:</p>
+      <div style="font-size:28px;font-weight:700;letter-spacing:4px;color:#1a1a1a;font-family:monospace;margin:8px 0;padding:12px;background:#fff;border:2px solid #e5e5e3;border-radius:6px;text-align:center" id="authCode">—</div>
+      <p style="font-size:12px;color:#666;margin-top:8px">Sign in with the email for this bot and approve the permissions.</p>
+    </div>
+    <div style="font-size:13px;color:#555;margin-bottom:6px" id="authStatusMsg">⏳ Starting...</div>
+    <div style="font-size:11px;color:#aaa" id="authExpiry"></div>
+  </div>
+</div>
+
 <!-- Thread detail panel -->
 <div class="detail-overlay" id="detailOverlay" onclick="closeDetail(event)">
   <div class="detail-panel" id="detailPanel">
@@ -731,12 +879,14 @@ let _runPolling = null;
 // ---------------------------------------------------------------------------
 async function boot() {
   await Promise.all([loadConfig(), loadThreads(), loadSchedule(), loadRunLog(), loadBots()]);
+  await loadAuthStatus();
   pollRunStatus();
   setInterval(() => {
     loadSchedule();
     loadRunLog();
     loadThreads();
     pollRunStatus();
+    loadAuthStatus();
   }, 30000);
 }
 
@@ -1113,13 +1263,19 @@ async function loadBots() {
   const el = document.getElementById('agentsList');
   if (!bots.length) { el.innerHTML = '<span style="color:#aaa;font-size:13px">No agents found.</span>'; return; }
   el.innerHTML = bots.map(b => `
-    <div style="padding:14px 0;border-bottom:1px solid #f0f0ee">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <div style="padding:14px 0;border-bottom:1px solid #f0f0ee" id="botPanel_${b.id}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
         <div>
-          <span style="font-weight:600;font-size:14px">${b.name}</span>
-          <span style="font-size:11px;color:#aaa;margin-left:6px">${b.email}</span>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-weight:600;font-size:14px">${b.name}</span>
+            <span style="font-size:11px;color:#aaa">${b.email}</span>
+            <span class="auth-badge auth-unauth" id="authBadge_${b.id}">Loading...</span>
+          </div>
         </div>
-        <button class="btn btn-sm" onclick="openPromptEditor('${b.id}','${b.name}')">Edit full prompt</button>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button class="btn btn-sm" id="authBtn_${b.id}" onclick="startAuth('${b.id}','${b.name}')">Authorize</button>
+          <button class="btn btn-sm" onclick="openPromptEditor('${b.id}','${b.name}')">Edit prompt</button>
+        </div>
       </div>
       <div class="field" style="padding:5px 0">
         <span class="field-label">Role</span>
@@ -1227,6 +1383,99 @@ async function deleteThread(tid) {
   await fetch(`/api/threads/${tid}`, {method: 'DELETE'});
   closeDetailPanel();
   loadThreads();
+}
+
+// ---------------------------------------------------------------------------
+// Outlook auth
+// ---------------------------------------------------------------------------
+let _authBotId  = null;
+let _authPolling = null;
+
+async function loadAuthStatus() {
+  for (const botId of ['bot_a', 'bot_b', 'bot_c']) {
+    try {
+      const d     = await fetch(`/api/auth/${botId}/status`).then(r => r.json());
+      const badge = document.getElementById(`authBadge_${botId}`);
+      const btn   = document.getElementById(`authBtn_${botId}`);
+      if (!badge) continue;
+
+      const ts = d.token_status;
+      const fs = d.flow_status;
+
+      if (fs === 'polling') {
+        badge.textContent = '⏳ Authorizing...';
+        badge.className   = 'auth-badge auth-pending';
+        if (btn) btn.style.display = 'none';
+      } else if (ts === 'connected') {
+        badge.textContent = '✓ Connected';
+        badge.className   = 'auth-badge auth-connected';
+        if (btn) btn.style.display = 'none';
+      } else if (ts === 'expired') {
+        badge.textContent = '⚠ Expired';
+        badge.className   = 'auth-badge auth-expired';
+        if (btn) { btn.style.display = ''; btn.textContent = 'Re-authorize'; }
+      } else {
+        badge.textContent = '✗ Not authorized';
+        badge.className   = 'auth-badge auth-unauth';
+        if (btn) { btn.style.display = ''; btn.textContent = 'Authorize'; }
+      }
+    } catch(_) {}
+  }
+}
+
+async function startAuth(botId, botName) {
+  _authBotId = botId;
+  _clearAuthPolling();
+
+  document.getElementById('authTitle').textContent    = `Authorize ${botName}`;
+  document.getElementById('authCode').textContent     = '...';
+  document.getElementById('authStatusMsg').textContent = '⏳ Starting authorization...';
+  document.getElementById('authExpiry').textContent   = '';
+  document.getElementById('authOverlay').classList.add('open');
+
+  try {
+    const res = await fetch(`/api/auth/${botId}/start`, {method: 'POST'});
+    const d   = await res.json();
+    if (!res.ok) {
+      document.getElementById('authStatusMsg').textContent = '❌ ' + (d.error || 'Failed');
+      return;
+    }
+    document.getElementById('authCode').textContent     = d.user_code;
+    document.getElementById('authStatusMsg').textContent = '⏳ Waiting for you to sign in...';
+    if (d.expires_in) {
+      const exp = new Date(Date.now() + d.expires_in * 1000);
+      document.getElementById('authExpiry').textContent = `Code expires at ${exp.toLocaleTimeString()}`;
+    }
+    _authPolling = setInterval(() => _pollAuth(botId), 4000);
+  } catch(e) {
+    document.getElementById('authStatusMsg').textContent = '❌ Network error — try again.';
+  }
+}
+
+async function _pollAuth(botId) {
+  try {
+    const d = await fetch(`/api/auth/${botId}/status`).then(r => r.json());
+    if (d.flow_status === 'connected' || d.token_status === 'connected') {
+      _clearAuthPolling();
+      document.getElementById('authStatusMsg').textContent = '✅ Successfully authorized!';
+      document.getElementById('authCode').textContent     = '✓';
+      setTimeout(() => { closeAuth(); loadAuthStatus(); }, 1500);
+    } else if (d.flow_status === 'failed') {
+      _clearAuthPolling();
+      document.getElementById('authStatusMsg').textContent = '❌ Sign-in failed or timed out. Try again.';
+    }
+  } catch(_) {}
+}
+
+function _clearAuthPolling() {
+  if (_authPolling) { clearInterval(_authPolling); _authPolling = null; }
+}
+function closeAuth() {
+  _clearAuthPolling();
+  document.getElementById('authOverlay').classList.remove('open');
+}
+function closeAuthOverlay(e) {
+  if (e.target === document.getElementById('authOverlay')) closeAuth();
 }
 
 // ---------------------------------------------------------------------------
