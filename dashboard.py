@@ -525,8 +525,9 @@ def api_save_bot(bot_id):
     cfg = _load_config()
     if bot_id not in cfg:
         return jsonify({"error": "bot not found"}), 404
-    if "role" in d: cfg[bot_id]["role"] = d["role"]
+    if "role"  in d: cfg[bot_id]["role"]  = d["role"]
     if "style" in d: cfg[bot_id]["style"] = d["style"]
+    if "email" in d: cfg[bot_id]["email"] = d["email"]
     _save_config(cfg)
     return jsonify({"ok": True})
 
@@ -1268,7 +1269,6 @@ async function loadBots() {
         <div>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <span style="font-weight:600;font-size:14px">${b.name}</span>
-            <span style="font-size:11px;color:#aaa">${b.email}</span>
             <span class="auth-badge auth-unauth" id="authBadge_${b.id}">Loading...</span>
           </div>
         </div>
@@ -1276,6 +1276,10 @@ async function loadBots() {
           <button class="btn btn-sm" id="authBtn_${b.id}" onclick="startAuth('${b.id}','${b.name}')">Authorize</button>
           <button class="btn btn-sm" onclick="openPromptEditor('${b.id}','${b.name}')">Edit prompt</button>
         </div>
+      </div>
+      <div class="field" style="padding:5px 0">
+        <span class="field-label">Email</span>
+        <input type="text" id="email_${b.id}" value="${b.email.replace(/"/g,'&quot;')}" style="width:260px">
       </div>
       <div class="field" style="padding:5px 0">
         <span class="field-label">Role</span>
@@ -1292,12 +1296,13 @@ async function loadBots() {
 }
 
 async function saveBot(botId) {
+  const email = document.getElementById(`email_${botId}`).value;
   const role  = document.getElementById(`role_${botId}`).value;
   const style = document.getElementById(`style_${botId}`).value;
   await fetch(`/api/bots/${botId}`, {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({role, style})
+    body: JSON.stringify({email, role, style})
   });
   const msg = document.getElementById('savedMsg');
   msg.textContent = 'Saved';
