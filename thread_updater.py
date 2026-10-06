@@ -117,6 +117,7 @@ def update_thread(
     transcript: List[Tuple[str, str]],
     run_number: int,
     client: Optional[Anthropic] = None,
+    topic: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Update thread state based on a completed conversation.
@@ -135,6 +136,18 @@ def update_thread(
         client = Anthropic()
 
     thread = load_thread(thread_id)
+
+    # Snapshot state before any modifications (enables rollback)
+    snapshot_before = {
+        "known_facts":      list(thread.get("known_facts", [])),
+        "open_questions":   [q.copy() for q in thread.get("open_questions", [])],
+        "action_items":     [a.copy() for a in thread.get("action_items", [])],
+        "decisions":        list(thread.get("decisions", [])),
+        "new_information":  list(thread.get("new_information", [])),
+        "last_run_summary": thread.get("last_run_summary", ""),
+        "discussion_focus": thread.get("discussion_focus", ""),
+    }
+
     prompt = _build_extraction_prompt(thread, transcript)
 
     try:
@@ -221,14 +234,18 @@ def update_thread(
     one_sentence = updates.get("one_sentence_summary", "(no summary generated)")
     thread["last_run_summary"] = one_sentence
 
-    # 8. Append history entry
+    # 8. Append history entry (with snapshot + topic for rollback support)
     history_entry = {
-        "run": run_number,
-        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "summary": one_sentence,
-        "questions_raised": updates.get("questions_to_add", []),
-        "decisions_made": updates.get("decisions_to_add", []),
+        "run":                      run_number,
+        "date":                     datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "topic":                    topic or thread.get("discussion_focus", ""),
+        "summary":                  one_sentence,
+        "questions_raised":         updates.get("questions_to_add", []),
+        "decisions_made":           updates.get("decisions_to_add", []),
         "new_information_processed": cleared_new_info,
+        "snapshot_before":          snapshot_before,
+        "transcript":               [{"sender": name, "body": body} for name, body in transcript],
+        "discarded":                False,
     }
     thread.setdefault("history", []).append(history_entry)
 

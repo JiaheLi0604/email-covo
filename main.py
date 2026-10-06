@@ -205,6 +205,8 @@ def build_memory_context(memory: MemoryService) -> Optional[str]:
 def run_conversation(
     config: Dict[str, Any],
     debug: bool = False,
+    thread_id_override: Optional[str] = None,
+    topic_override: Optional[str] = None,
 ) -> Optional[List[Tuple[str, str]]]:
     """
     Execute one complete email conversation.
@@ -232,7 +234,11 @@ def run_conversation(
         # When conversation_mode = "deal", load the active Deal Thread instead.
         mode = config.get("conversation_mode", "operations")
         if mode == "deal":
-            topic = build_deal_topic(config)
+            topic = build_deal_topic(
+                config,
+                thread_id_override=thread_id_override,
+                topic_override=topic_override,
+            )
         elif "weekly_context" in config:
             topic = build_runtime_context(config)
         else:
@@ -422,22 +428,28 @@ def run_conversation(
     return transcript
 
 
-def _auto_update_thread(config: Dict[str, Any], transcript: List[Tuple[str, str]]) -> None:
+def _auto_update_thread(
+    config: Dict[str, Any],
+    transcript: List[Tuple[str, str]],
+    thread_id_override: Optional[str] = None,
+    topic_override: Optional[str] = None,
+) -> None:
     """
     After a deal-mode conversation, update the active thread's persistent state.
     Called automatically from main() when conversation_mode = 'deal'.
     Failures are non-fatal — the conversation already completed successfully.
     """
     active_threads = config.get("active_threads", [])
-    if not active_threads:
+    thread_id = thread_id_override or (active_threads[0] if active_threads else None)
+    if not thread_id:
         return
-    thread_id = active_threads[0]
     try:
         from thread_service import load_thread
         from thread_updater import update_thread, print_thread_summary
         thread = load_thread(thread_id)
-        run_num = len(thread.get("history", [])) + 1
-        updated = update_thread(thread_id, transcript, run_num)
+        # Count only non-discarded entries to get the true run number
+        run_num = sum(1 for h in thread.get("history", []) if not h.get("discarded")) + 1
+        updated = update_thread(thread_id, transcript, run_num, topic=topic_override)
         print_thread_summary(updated)
     except Exception as e:
         print(f"\n[thread_updater] Warning: could not auto-update thread '{thread_id}': {e}")

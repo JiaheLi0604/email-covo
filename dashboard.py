@@ -363,6 +363,10 @@ def api_run():
     if _run_state["running"]:
         return jsonify({"error": "A run is already in progress"}), 409
 
+    d = request.get_json() or {}
+    thread_id_override = d.get("thread_id") or None
+    topic_override     = (d.get("topic") or "").strip() or None
+
     def _do():
         _run_state["running"]    = True
         _run_state["started_at"] = datetime.now(timezone.utc).isoformat()
@@ -372,22 +376,32 @@ def api_run():
         try:
             from main import load_config as lc, run_conversation, _auto_update_thread
             cfg        = lc()
-            transcript = run_conversation(cfg)
+            transcript = run_conversation(
+                cfg,
+                thread_id_override=thread_id_override,
+                topic_override=topic_override,
+            )
             if transcript:
                 turns  = len(transcript)
                 status = "completed"
                 if cfg.get("conversation_mode") == "deal":
-                    _auto_update_thread(cfg, transcript)
+                    _auto_update_thread(
+                        cfg, transcript,
+                        thread_id_override=thread_id_override,
+                        topic_override=topic_override,
+                    )
         except Exception as e:
             _run_state["error"] = str(e)
             status = "error"
         finally:
             _run_state["running"] = False
         _append_run_log({
-            "started_at": _run_state["started_at"],
-            "turns":      turns,
-            "status":     status,
-            "error":      _run_state.get("error"),
+            "started_at":  _run_state["started_at"],
+            "turns":       turns,
+            "status":      status,
+            "error":       _run_state.get("error"),
+            "thread_id":   thread_id_override or "auto",
+            "topic":       topic_override or "",
         })
 
     threading.Thread(target=_do, daemon=True).start()
@@ -400,6 +414,87 @@ def api_run_status():
 @app.route("/api/runlog")
 def api_runlog():
     return jsonify(_load_run_log()[:10])
+
+
+# ---------------------------------------------------------------------------
+# API — Rollback / restore
+# ---------------------------------------------------------------------------
+
+@app.route("/api/threads/<tid>/rollback/<int:index>", methods=["POST"])
+def api_rollback(tid, index):
+    """Soft-discard history[index:] and restore thread state to before that run."""
+    if _run_state["running"]:
+        return jsonify({"error": "等当前 run 跑完再操作"}), 409
+    try:
+        t = _load_thread(tid)
+    except FileNotFoundError:
+        return jsonify({"error": "not found"}), 404
+
+    history = t.get("history", [])
+    if index < 0 or index >= len(history):
+        return jsonify({"error": "invalid index"}), 400
+
+    snapshot = history[index].get("snapshot_before")
+    if not snapshot:
+        return jsonify({"error": "No snapshot available for this entry (run predates this feature)"}), 400
+
+    # Save current full state as rollback_backup so restore is possible
+    t["_rollback_backup"] = {
+        "known_facts":      list(t.get("known_facts", [])),
+        "open_questions":   [q.copy() for q in t.get("open_questions", [])],
+        "action_items":     [a.copy() for a in t.get("action_items", [])],
+        "decisions":        list(t.get("decisions", [])),
+        "new_information":  list(t.get("new_information", [])),
+        "last_run_summary": t.get("last_run_summary", ""),
+        "discussion_focus": t.get("discussion_focus", ""),
+        "discarded_from":   index,
+    }
+
+    # Restore thread state to pre-run snapshot
+    for field in ["known_facts", "open_questions", "action_items", "decisions",
+                  "new_information", "last_run_summary", "discussion_focus"]:
+        if field in snapshot:
+            t[field] = snapshot[field]
+
+    # Soft-discard this and all subsequent history entries
+    for i in range(index, len(history)):
+        history[i]["discarded"] = True
+
+    _save_thread(tid, t)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/threads/<tid>/restore", methods=["POST"])
+def api_restore(tid):
+    """Undo a rollback: restore thread state from _rollback_backup and un-discard entries."""
+    if _run_state["running"]:
+        return jsonify({"error": "等当前 run 跑完再操作"}), 409
+    try:
+        t = _load_thread(tid)
+    except FileNotFoundError:
+        return jsonify({"error": "not found"}), 404
+
+    backup = t.get("_rollback_backup")
+    if not backup:
+        return jsonify({"error": "No rollback backup found for this thread"}), 400
+
+    discarded_from = backup.get("discarded_from", 0)
+
+    # Restore state
+    for field in ["known_facts", "open_questions", "action_items", "decisions",
+                  "new_information", "last_run_summary", "discussion_focus"]:
+        if field in backup:
+            t[field] = backup[field]
+
+    # Un-discard entries
+    for i in range(discarded_from, len(t.get("history", []))):
+        t["history"][i].pop("discarded", None)
+
+    # Clear the backup
+    t.pop("_rollback_backup", None)
+
+    _save_thread(tid, t)
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -796,9 +891,21 @@ input:checked+.slider:before{transform:translateX(16px)}
 
       <!-- Run Now -->
       <div class="card">
-        <div class="card-title">Controls</div>
-        <button class="btn-run" id="runBtn" onclick="triggerRun()">▶ Run now</button>
-        <div class="run-indicator" id="runIndicator">⏳ Run in progress...</div>
+        <div class="card-title">Run now</div>
+        <div class="field" style="padding:6px 0">
+          <span class="field-label">Thread</span>
+          <select id="runThread" style="border:1px solid #ddd;border-radius:6px;padding:4px 8px;font-size:13px;background:#fff;color:#1a1a1a;width:190px;outline:none">
+            <option value="">— select thread —</option>
+          </select>
+        </div>
+        <div class="field" style="padding:6px 0;border-bottom:none">
+          <span class="field-label" style="flex-shrink:0">Topic <span style="color:#aaa;font-weight:400">(optional)</span></span>
+          <input type="text" id="runTopic" placeholder="Override focus for this run..." style="width:190px">
+        </div>
+        <div style="margin-top:12px">
+          <button class="btn-run" id="runBtn" onclick="triggerRun()">▶ Run now</button>
+          <div class="run-indicator" id="runIndicator">⏳ Run in progress...</div>
+        </div>
       </div>
 
       <!-- Today's schedule -->
@@ -945,6 +1052,18 @@ async function loadThreads() {
 
   const active = threads.find(t => t.is_active);
   if (active) document.getElementById('statThreadRun').textContent = `Run ${active.run_count}`;
+
+  // Populate run-thread dropdown (active threads only)
+  const sel = document.getElementById('runThread');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— select thread —</option>' +
+    threads.filter(t => t.is_active).map(t =>
+      `<option value="${t.id}" ${t.id === prev ? 'selected' : ''}>${t.name}</option>`
+    ).join('');
+  // Auto-select first active if nothing chosen
+  if (!sel.value && threads.filter(t => t.is_active).length) {
+    sel.value = threads.filter(t => t.is_active)[0].id;
+  }
 
   el.innerHTML = threads.map(t => `
     <div class="thread-row">
@@ -1095,6 +1214,8 @@ function renderDetail() {
 
     ${newInfoHtml ? `<div class="detail-section"><div class="detail-section-title">New information queued</div>${newInfoHtml}</div>` : ''}
 
+    ${renderHistory(t)}
+
     <div class="divider"></div>
 
     <div class="detail-section">
@@ -1169,6 +1290,72 @@ async function submitNewInfo() {
   renderDetail();
 }
 
+// ---------------------------------------------------------------------------
+// Thread history — rollback / restore
+// ---------------------------------------------------------------------------
+function renderHistory(t) {
+  const history = t.history || [];
+  if (!history.length) return '';
+  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const hasBackup = !!t._rollback_backup;
+
+  const rows = history.map((h, i) => {
+    const discarded = !!h.discarded;
+    const topic   = h.topic   ? `<span style="font-size:11px;color:#2563eb;margin-left:6px">${esc(h.topic)}</span>` : '';
+    const summary = h.summary ? `<div style="font-size:12px;color:#555;margin-top:3px;line-height:1.4">${esc(h.summary)}</div>` : '';
+    const label   = `Run ${h.run} · ${h.date}`;
+    const controls = discarded
+      ? `<span style="font-size:11px;color:#bbb">已弃用</span>`
+      : `<button class="btn btn-sm" style="font-size:11px;color:#dc2626;border-color:#fca5a5" onclick="rollback('${t.thread_id}',${i})">↺ 重新讨论</button>`;
+    return `
+      <div style="padding:8px 10px;border-radius:6px;background:${discarded?'#f9f9f7':'#fff'};border:1px solid ${discarded?'#f0f0ee':'#e5e5e3'};margin-bottom:6px;opacity:${discarded?'0.55':'1'}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <span style="font-size:12px;font-weight:600;color:${discarded?'#aaa':'#333'}">${esc(label)}</span>${topic}
+            ${summary}
+          </div>
+          <div style="flex-shrink:0;margin-left:10px">${controls}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  const restoreBtn = hasBackup
+    ? `<div style="margin-top:8px;text-align:right"><button class="btn btn-sm" onclick="restoreThread('${t.thread_id}')">↩ 撤销回滚</button></div>`
+    : '';
+
+  return `
+    <div class="divider"></div>
+    <div class="detail-section">
+      <div class="detail-section-title">Run history</div>
+      <p style="font-size:11px;color:#aaa;margin-bottom:8px">↺ 重新讨论 = 回到该 run 之前的状态重新讨论。<strong>已发送的邮件不受影响。</strong></p>
+      ${rows}
+      ${restoreBtn}
+    </div>`;
+}
+
+async function rollback(tid, index) {
+  if (!confirm(`将 Run ${index+1} 及之后的记录标记为"已弃用"，thread 状态回到该 run 之前。\n\n⚠️ 已发送的邮件不受影响。\n\n确认重新讨论？`)) return;
+  const res = await fetch(`/api/threads/${tid}/rollback/${index}`, {method:'POST'});
+  const d = await res.json();
+  if (!res.ok) { alert(d.error || 'Failed'); return; }
+  // Refresh detail panel
+  _td = await fetch(`/api/threads/${tid}`).then(r => r.json());
+  renderDetail();
+  const msg = document.getElementById('savedMsg');
+  msg.textContent = '已回滚';
+  msg.classList.add('show');
+  setTimeout(() => { msg.classList.remove('show'); msg.textContent = 'Saved'; }, 2500);
+}
+
+async function restoreThread(tid) {
+  if (!confirm('撤销上次回滚，将记录恢复为"有效"，并还原 thread 状态？')) return;
+  const res = await fetch(`/api/threads/${tid}/restore`, {method:'POST'});
+  const d = await res.json();
+  if (!res.ok) { alert(d.error || 'Failed'); return; }
+  _td = await fetch(`/api/threads/${tid}`).then(r => r.json());
+  renderDetail();
+}
+
 function closeDetailPanel() {
   document.getElementById('detailOverlay').classList.remove('open');
 }
@@ -1224,9 +1411,17 @@ async function loadRunLog() {
 // Run now
 // ---------------------------------------------------------------------------
 async function triggerRun() {
+  const threadId = document.getElementById('runThread').value;
+  const topic    = document.getElementById('runTopic').value.trim();
+  if (!threadId) { alert('Please select a thread to run.'); return; }
+
   const btn = document.getElementById('runBtn');
   const ind = document.getElementById('runIndicator');
-  const res = await fetch('/api/run', {method:'POST'});
+  const res = await fetch('/api/run', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({thread_id: threadId, topic: topic || null})
+  });
   if (!res.ok) { alert((await res.json()).error); return; }
   btn.disabled = true;
   ind.classList.add('show');

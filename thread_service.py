@@ -226,8 +226,8 @@ def build_thread_context(thread: Dict[str, Any], discussion_focus: Optional[str]
     if last_summary:
         lines += ["", f"LAST DISCUSSION SUMMARY: {last_summary}"]
 
-    # Recent history (last 2 runs max)
-    history = thread.get("history", [])
+    # Recent history (last 2 runs max) — skip discarded entries
+    history = [h for h in thread.get("history", []) if not h.get("discarded")]
     if history:
         recent = history[-2:]
         lines += ["", "PREVIOUS RUNS:"]
@@ -270,39 +270,46 @@ def build_thread_context(thread: Dict[str, Any], discussion_focus: Optional[str]
 # Integration point for main.py
 # ---------------------------------------------------------------------------
 
-def build_deal_topic(config: Dict[str, Any]) -> str:
+def build_deal_topic(
+    config: Dict[str, Any],
+    thread_id_override: Optional[str] = None,
+    topic_override: Optional[str] = None,
+) -> str:
     """
     Build the topic string for deal mode. Called from main.py in place of
     build_runtime_context() when conversation_mode = 'deal'.
 
-    Steps:
-      1. Load the active thread JSON
-      2. Call Claude (Haiku) to determine the highest-priority discussion focus
-      3. Write the focus back to the thread JSON for logging/inspection
-      4. Return the full topic context string
+    Args:
+        config:             loaded config dict
+        thread_id_override: if set, use this thread instead of active_threads[0]
+        topic_override:     if set, use as discussion focus without calling Claude
+                            and WITHOUT writing it back to the thread JSON
+                            (one-time only — does not pollute discussion_focus)
 
     Does not raise — returns an error message string on misconfiguration.
     """
-    active_threads = config.get("active_threads", [])
-    if not active_threads:
+    thread_id = thread_id_override or (config.get("active_threads") or [None])[0]
+    if not thread_id:
         return (
             "== DEAL MODE — NO ACTIVE THREAD ==\n"
-            "Set 'active_threads' in config.json to the thread ID(s) you want to discuss."
+            "Set 'active_threads' in config.json or select a thread in the dashboard."
         )
 
-    thread_id = active_threads[0]
     try:
         thread = load_thread(thread_id)
     except ThreadServiceError as e:
         return f"[ERROR loading thread '{thread_id}']: {e}"
 
-    # Determine dynamic focus for this run
-    print(f"[thread_service] Determining discussion focus for '{thread_id}'...")
-    focus = _determine_discussion_focus(thread)
-    print(f"[thread_service] Focus: {focus}")
-
-    # Write focus back to JSON (for inspection after each run)
-    thread["discussion_focus"] = focus
-    save_thread(thread)
+    if topic_override:
+        # Use the caller-specified topic — do NOT write back to JSON
+        focus = topic_override
+    else:
+        # Determine dynamic focus for this run
+        print(f"[thread_service] Determining discussion focus for '{thread_id}'...")
+        focus = _determine_discussion_focus(thread)
+        print(f"[thread_service] Focus: {focus}")
+        # Write focus back to JSON (for inspection / dashboard display)
+        thread["discussion_focus"] = focus
+        save_thread(thread)
 
     return build_thread_context(thread, discussion_focus=focus)
