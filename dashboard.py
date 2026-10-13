@@ -653,6 +653,247 @@ def api_save_prompt(bot_id):
 
 
 # ---------------------------------------------------------------------------
+# API — Chat (embedded Claude chatbot)
+# ---------------------------------------------------------------------------
+
+def _execute_chat_tool(name: str, inp: dict) -> dict:
+    """Execute a tool call from the embedded chatbot."""
+    try:
+        if name == "list_threads":
+            cfg = _load_config()
+            active_set = set(cfg.get("active_threads", []))
+            threads = []
+            for tid in _list_thread_ids():
+                try:
+                    t = _load_thread(tid)
+                    history = [h for h in t.get("history", []) if not h.get("discarded")]
+                    threads.append({
+                        "id": tid,
+                        "name": t.get("thread_id", tid).replace("_", " ").title(),
+                        "stage": t.get("stage", ""),
+                        "active": tid in active_set,
+                        "discussion_focus": t.get("discussion_focus", ""),
+                        "last_run_summary": t.get("last_run_summary", ""),
+                        "run_count": len(history),
+                        "open_questions": sum(1 for q in t.get("open_questions", []) if not q.get("resolved")),
+                        "open_actions": sum(1 for a in t.get("action_items", []) if a.get("status") == "open"),
+                        "known_facts_count": len(t.get("known_facts", [])),
+                    })
+                except Exception:
+                    pass
+            return {"threads": threads}
+
+        elif name == "get_thread":
+            tid = inp.get("thread_id", "")
+            t = _load_thread(tid)
+            t_clean = dict(t)
+            t_clean["history"] = [
+                {k: v for k, v in h.items() if k not in ("transcript", "snapshot_before")}
+                for h in t.get("history", []) if not h.get("discarded")
+            ]
+            return {"thread": t_clean}
+
+        elif name == "patch_thread":
+            tid = inp.get("thread_id", "")
+            op  = inp.get("operation", "")
+            val = inp.get("value", "")
+            idx = inp.get("index")
+            owner = inp.get("owner", "Li")
+
+            t = _load_thread(tid)
+            changed = False
+            action_summary = ""
+
+            if op == "add_fact":
+                t.setdefault("known_facts", []).append(val)
+                changed = True; action_summary = f"Added fact to {tid}: '{val}'"
+            elif op == "remove_fact":
+                facts = t.get("known_facts", [])
+                if idx is not None and 0 <= idx < len(facts):
+                    removed = facts.pop(idx); t["known_facts"] = facts
+                    changed = True; action_summary = f"Removed fact from {tid}: '{removed}'"
+            elif op == "add_question":
+                t.setdefault("open_questions", []).append({"question": val, "resolved": False})
+                changed = True; action_summary = f"Added question to {tid}: '{val}'"
+            elif op == "resolve_question":
+                qs = t.get("open_questions", [])
+                if idx is not None and 0 <= idx < len(qs):
+                    qs[idx]["resolved"] = True
+                    changed = True; action_summary = f"Resolved question #{idx} in {tid}"
+            elif op == "unresolve_question":
+                qs = t.get("open_questions", [])
+                if idx is not None and 0 <= idx < len(qs):
+                    qs[idx]["resolved"] = False
+                    changed = True; action_summary = f"Re-opened question #{idx} in {tid}"
+            elif op == "add_action":
+                t.setdefault("action_items", []).append({"item": val, "owner": owner, "status": "open"})
+                changed = True; action_summary = f"Added action to {tid}: '{val}' → {owner}"
+            elif op == "complete_action":
+                actions = t.get("action_items", [])
+                if idx is not None and 0 <= idx < len(actions):
+                    actions[idx]["status"] = "done"
+                    changed = True; action_summary = f"Completed action #{idx} in {tid}"
+            elif op == "reopen_action":
+                actions = t.get("action_items", [])
+                if idx is not None and 0 <= idx < len(actions):
+                    actions[idx]["status"] = "open"
+                    changed = True; action_summary = f"Re-opened action #{idx} in {tid}"
+            elif op == "remove_action":
+                actions = t.get("action_items", [])
+                if idx is not None and 0 <= idx < len(actions):
+                    removed = actions.pop(idx); t["action_items"] = actions
+                    changed = True; action_summary = f"Removed action from {tid}: '{removed.get('item', '')}'"
+            elif op == "add_decision":
+                t.setdefault("decisions", []).append(val)
+                changed = True; action_summary = f"Added decision to {tid}: '{val}'"
+            elif op == "remove_decision":
+                decisions = t.get("decisions", [])
+                if idx is not None and 0 <= idx < len(decisions):
+                    removed = decisions.pop(idx); t["decisions"] = decisions
+                    changed = True; action_summary = f"Removed decision from {tid}: '{removed}'"
+            elif op == "add_new_info":
+                t.setdefault("new_information", []).append(val)
+                changed = True; action_summary = f"Added new info to {tid}: '{val}'"
+            elif op == "set_discussion_focus":
+                t["discussion_focus"] = val
+                changed = True; action_summary = f"Updated focus for {tid}: '{val}'"
+
+            if changed:
+                _save_thread(tid, t)
+            return {"ok": True, "changed": changed, "action_summary": action_summary}
+
+        else:
+            return {"error": f"Unknown tool: {name}", "changed": False}
+
+    except Exception as e:
+        return {"error": str(e), "changed": False}
+
+
+@app.route("/api/chat", methods=["POST"])
+def api_chat():
+    import anthropic as _ant
+    d = request.get_json() or {}
+    messages = d.get("messages", [])
+    if not messages:
+        return jsonify({"error": "no messages"}), 400
+
+    # Build system prompt with live thread summaries
+    cfg = _load_config()
+    active_set = set(cfg.get("active_threads", []))
+    thread_lines = []
+    for tid in _list_thread_ids():
+        try:
+            t = _load_thread(tid)
+            status = "ACTIVE" if tid in active_set else "inactive"
+            focus = t.get("discussion_focus", t.get("stage", ""))
+            open_q = sum(1 for q in t.get("open_questions", []) if not q.get("resolved"))
+            open_a = sum(1 for a in t.get("action_items", []) if a.get("status") == "open")
+            thread_lines.append(f"- {tid} [{status}]: {focus} | {open_q} open Qs, {open_a} open actions")
+        except Exception:
+            pass
+
+    system = (
+        "You are an AI assistant embedded in Cratus Asset Management's deal pipeline dashboard.\n"
+        "You help the team understand and manage their real estate deal threads.\n\n"
+        "CURRENT THREADS:\n" + ("\n".join(thread_lines) if thread_lines else "No threads yet.") + "\n\n"
+        "You can answer questions about any thread and modify thread data using tools.\n"
+        "When you make changes, briefly confirm what was done. Be concise and professional.\n"
+        f"Today: {datetime.now().strftime('%Y-%m-%d')}"
+    )
+
+    tools = [
+        {
+            "name": "list_threads",
+            "description": "Get a summary of all deal threads including status, open questions, and action counts.",
+            "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "get_thread",
+            "description": "Get full details of a specific deal thread (facts, questions, actions, decisions, history).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string", "description": "The thread ID (e.g. washington_rv_park)"}
+                },
+                "required": ["thread_id"]
+            }
+        },
+        {
+            "name": "patch_thread",
+            "description": (
+                "Modify a deal thread. Operations: add_fact, remove_fact (needs index), "
+                "add_question, resolve_question (needs index), unresolve_question (needs index), "
+                "add_action (needs owner), complete_action (needs index), reopen_action (needs index), "
+                "remove_action (needs index), add_decision, remove_decision (needs index), "
+                "add_new_info, set_discussion_focus."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "operation": {
+                        "type": "string",
+                        "enum": [
+                            "add_fact", "remove_fact", "add_question", "resolve_question",
+                            "unresolve_question", "add_action", "complete_action", "reopen_action",
+                            "remove_action", "add_decision", "remove_decision", "add_new_info",
+                            "set_discussion_focus"
+                        ]
+                    },
+                    "value": {"type": "string", "description": "Text for add operations or set_discussion_focus"},
+                    "index": {"type": "integer", "description": "Zero-based index for remove/resolve/complete operations"},
+                    "owner": {"type": "string", "description": "Owner name for add_action (Li, Brian, or Joey Wan)"}
+                },
+                "required": ["thread_id", "operation"]
+            }
+        }
+    ]
+
+    client = _ant.Anthropic()
+    loop_messages = list(messages)
+    final_text = ""
+    actions_taken = []
+
+    for _ in range(6):  # max 6 tool-call rounds
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=system,
+            tools=tools,
+            messages=loop_messages
+        )
+
+        if response.stop_reason == "end_turn":
+            for block in response.content:
+                if hasattr(block, "text"):
+                    final_text = block.text
+            break
+
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            loop_messages.append({"role": "assistant", "content": response.content})
+            for block in response.content:
+                if block.type == "tool_use":
+                    result = _execute_chat_tool(block.name, block.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result)
+                    })
+                    if result.get("changed"):
+                        actions_taken.append(result.get("action_summary", ""))
+            loop_messages.append({"role": "user", "content": tool_results})
+        else:
+            # Unknown stop reason — extract any text and bail
+            for block in response.content:
+                if hasattr(block, "text"):
+                    final_text = block.text
+            break
+
+    return jsonify({"reply": final_text, "actions_taken": actions_taken})
+
+
+# ---------------------------------------------------------------------------
 # Frontend
 # ---------------------------------------------------------------------------
 
@@ -664,277 +905,319 @@ HTML = r"""<!DOCTYPE html>
 <title>Cratus — Email Automation</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;color:#1a1a1a;background:#f5f5f3;min-height:100vh}
-a{color:inherit;text-decoration:none}
+html,body{height:100%;overflow:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;color:#1a1a1a;background:#f5f5f3;display:flex;flex-direction:column}
 button{font-family:inherit;cursor:pointer}
 input,select,textarea{font-family:inherit;font-size:13px}
 
-/* layout */
-.topbar{background:#fff;border-bottom:1px solid #e5e5e3;padding:0 24px;height:52px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
-.topbar-left{display:flex;align-items:center;gap:10px}
-.logo{font-weight:600;font-size:15px;letter-spacing:-.01em}
-.status-dot{width:7px;height:7px;border-radius:50%;background:#22c55e;display:inline-block}
-.status-label{font-size:12px;color:#666}
-.topbar-right{display:flex;align-items:center;gap:8px}
-.main{max-width:1100px;margin:0 auto;padding:24px 24px 48px}
-
-/* stats row */
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}
-.stat-card{background:#fff;border:1px solid #e5e5e3;border-radius:10px;padding:14px 18px}
-.stat-n{font-size:22px;font-weight:600;letter-spacing:-.02em;margin-bottom:2px}
-.stat-l{font-size:12px;color:#888}
-
-/* two-column layout */
-.cols{display:grid;grid-template-columns:1fr 340px;gap:16px;align-items:start}
-
-/* cards */
-.card{background:#fff;border:1px solid #e5e5e3;border-radius:10px;padding:18px 20px;margin-bottom:16px}
-.card:last-child{margin-bottom:0}
-.card-title{font-size:12px;font-weight:600;color:#888;letter-spacing:.06em;text-transform:uppercase;margin-bottom:14px}
-
-/* form rows */
-.field{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f0f0ee}
-.field:last-child{border-bottom:none}
-.field-label{font-size:13px;color:#444}
-.field-right{display:flex;align-items:center;gap:6px}
-input[type=text],input[type=number],input[type=time]{border:1px solid #ddd;border-radius:6px;padding:4px 8px;font-size:13px;color:#1a1a1a;background:#fff;outline:none;transition:border .15s}
-input[type=text]:focus,input[type=number]:focus,input[type=time]:focus{border-color:#666}
-input[type=text]{width:220px}
-input[type=number]{width:56px;text-align:center}
-input[type=time]{width:100px}
-.toggle{position:relative;display:inline-block;width:36px;height:20px}
-.toggle input{opacity:0;width:0;height:0}
-.slider{position:absolute;inset:0;background:#ccc;border-radius:20px;transition:.2s;cursor:pointer}
-.slider:before{content:'';position:absolute;width:14px;height:14px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
-input:checked+.slider{background:#1a1a1a}
-input:checked+.slider:before{transform:translateX(16px)}
-.save-row{display:flex;justify-content:flex-end;margin-top:12px}
-.btn{border:1px solid #ddd;border-radius:6px;padding:6px 14px;font-size:13px;background:#fff;color:#1a1a1a;transition:background .15s,border .15s}
-.btn:hover{background:#f5f5f3;border-color:#bbb}
-.btn-primary{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
-.btn-primary:hover{background:#333;border-color:#333}
-.btn-run{width:100%;padding:11px;font-size:14px;font-weight:600;background:#1a1a1a;color:#fff;border:none;border-radius:8px;transition:background .15s}
-.btn-run:hover{background:#333}
-.btn-run:disabled{background:#999;cursor:not-allowed}
-.btn-sm{padding:3px 10px;font-size:12px;border-radius:5px}
+/* === Top bar === */
+.topbar{height:48px;background:#fff;border-bottom:1px solid #e5e5e3;display:flex;align-items:center;padding:0 16px;gap:14px;flex-shrink:0;z-index:10}
+.logo{font-weight:600;font-size:14px;letter-spacing:-.01em}
+.tb-div{width:1px;height:18px;background:#e5e5e3}
+.stat-pill{display:flex;align-items:center;gap:5px;font-size:12px;color:#555}
+.stat-dot{width:6px;height:6px;border-radius:50%;background:#22c55e}
+.stat-dot.off{background:#d1d5db}
+.tb-right{margin-left:auto;display:flex;align-items:center;gap:8px}
 .saved-msg{font-size:12px;color:#22c55e;opacity:0;transition:opacity .3s}
 .saved-msg.show{opacity:1}
 
-/* threads list */
-.thread-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid #f0f0ee}
-.thread-row:last-child{border-bottom:none}
-.thread-name{font-weight:500;font-size:13px}
-.thread-meta{font-size:11px;color:#999;margin-top:2px}
-.thread-badges{display:flex;gap:5px;align-items:center}
-.badge{font-size:11px;padding:2px 7px;border-radius:20px;font-weight:500}
-.badge-yellow{background:#fef3c7;color:#92400e}
-.badge-blue{background:#dbeafe;color:#1e40af}
-.badge-gray{background:#f3f4f6;color:#6b7280}
+/* === Workspace === */
+.workspace{flex:1;display:flex;overflow:hidden}
 
-/* schedule */
-.sched-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:13px;color:#444}
-.sched-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-.sched-past{color:#aaa;text-decoration:line-through}
+/* === Left sidebar === */
+.sidebar-left{width:248px;background:#fff;border-right:1px solid #e5e5e3;overflow-y:auto;flex-shrink:0;display:flex;flex-direction:column}
+.sec-hdr{display:flex;justify-content:space-between;align-items:center;padding:11px 16px;cursor:pointer;border-bottom:1px solid #f0f0ee;user-select:none}
+.sec-hdr:hover{background:#fafafa}
+.sec-title{font-size:11px;font-weight:600;color:#999;letter-spacing:.06em;text-transform:uppercase}
+.sec-chev{font-size:10px;color:#ccc;transition:transform .2s;margin-left:4px}
+.sec-chev.open{transform:rotate(90deg)}
+.sec-body{padding:14px 16px;border-bottom:1px solid #f0f0ee;display:none}
+.sec-body.open{display:block}
 
-/* run history */
-.log-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f0f0ee;font-size:12px}
-.log-row:last-child{border-bottom:none}
-.log-status{font-size:11px;padding:1px 6px;border-radius:4px;font-weight:500}
-.log-ok{background:#dcfce7;color:#166534}
-.log-err{background:#fee2e2;color:#991b1b}
-.log-fail{background:#f3f4f6;color:#6b7280}
-.run-indicator{font-size:12px;color:#666;margin-top:8px;display:none}
-.run-indicator.show{display:block}
+/* Form elements */
+.field-row{display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f8f8f6}
+.field-row:last-child{border-bottom:none}
+.field-lbl{font-size:12px;color:#555;flex-shrink:0}
+.field-row input[type=text],.field-row input[type=number],.field-row input[type=time]{border:1px solid #e0e0de;border-radius:5px;padding:3px 6px;font-size:12px;color:#1a1a1a;background:#fff;outline:none;width:96px}
+.toggle{position:relative;display:inline-block;width:30px;height:17px}
+.toggle input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:#ddd;border-radius:17px;transition:.2s;cursor:pointer}
+.slider:before{content:'';position:absolute;width:11px;height:11px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
+input:checked+.slider{background:#1a1a1a}
+input:checked+.slider:before{transform:translateX(13px)}
+.save-row{display:flex;justify-content:flex-end;margin-top:10px}
+.btn{border:1px solid #ddd;border-radius:6px;padding:5px 12px;font-size:12px;background:#fff;color:#1a1a1a;transition:background .15s}
+.btn:hover{background:#f5f5f3}
+.btn-primary{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+.btn-primary:hover{background:#333}
+.btn-sm{padding:3px 8px;font-size:11px;border-radius:5px}
+.btn-danger{color:#dc2626;border-color:#fca5a5}
 
-/* thread detail panel */
-.detail-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:200;display:none;align-items:flex-start;justify-content:flex-end}
-.detail-overlay.open{display:flex}
-.detail-panel{background:#fff;width:560px;height:100vh;overflow-y:auto;padding:24px;box-shadow:-4px 0 24px rgba(0,0,0,.08)}
-.detail-close{float:right;font-size:20px;border:none;background:none;color:#888;cursor:pointer;padding:0 4px}
-.detail-section{margin-bottom:20px}
-.detail-section-title{font-size:11px;font-weight:600;color:#888;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
-.detail-section p,.detail-section li{font-size:13px;color:#333;line-height:1.6}
-.detail-section ul{padding-left:16px}
-.detail-section li{margin-bottom:4px}
-.q-item{padding:7px 10px;border-radius:6px;background:#f9f9f7;margin-bottom:5px;font-size:13px;color:#333;line-height:1.5}
-.action-item{padding:7px 10px;border-radius:6px;background:#f0fdf4;margin-bottom:5px;font-size:13px}
-.action-owner{font-size:11px;color:#16a34a;margin-top:2px}
-.new-info-area{width:100%;border:1px solid #ddd;border-radius:6px;padding:8px 10px;font-size:13px;resize:vertical;min-height:70px;outline:none}
-.new-info-area:focus{border-color:#666}
-.focus-box{background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:10px 12px;font-size:13px;color:#1e3a5f;margin-bottom:12px;line-height:1.5}
-.divider{height:1px;background:#f0f0ee;margin:14px 0}
-.edit-row{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:6px;background:#f9f9f7;margin-bottom:4px}
-.edit-row:hover{background:#f0f0ee}
-.edit-text{flex:1;font-size:13px;color:#333;line-height:1.5;min-width:0;word-break:break-word}
-.item-resolved .edit-text{text-decoration:line-through;color:#aaa}
-.icon-btn{border:none;background:none;cursor:pointer;font-size:14px;color:#bbb;padding:0 2px;line-height:1;flex-shrink:0;margin-top:1px}
-.icon-btn:hover{color:#666}
-.icon-btn-green:hover{color:#16a34a}
-.icon-btn-blue:hover{color:#2563eb}
+/* Agent rows */
+.agent-row{padding:10px 0;border-bottom:1px solid #f0f0ee}
+.agent-row:last-child{border-bottom:none}
+.agent-name{font-weight:600;font-size:13px;margin-bottom:1px;display:flex;align-items:center;gap:6px}
+.agent-email{font-size:11px;color:#aaa;margin-bottom:4px}
+.agent-sub{font-size:11px;color:#888;margin-top:6px;margin-bottom:2px}
 
-/* auth badges */
-.auth-badge{font-size:11px;padding:2px 7px;border-radius:20px;font-weight:500;display:inline-block}
+/* Auth badges */
+.auth-badge{font-size:10px;padding:1px 5px;border-radius:8px;font-weight:500}
 .auth-connected{background:#dcfce7;color:#166534}
 .auth-expired{background:#fef3c7;color:#92400e}
 .auth-unauth{background:#fee2e2;color:#991b1b}
 .auth-pending{background:#dbeafe;color:#1e40af}
+
+/* Thread mgmt in left sidebar */
+.tmgmt-row{display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f8f8f6}
+.tmgmt-row:last-child{border-bottom:none}
+.tmgmt-name{font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;margin:0 6px}
+
+/* Sched mini */
+.sched-mini-row{display:flex;align-items:center;gap:5px;padding:2px 0}
+.sched-dot-m{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+
+/* === Chat center === */
+.chat-main{flex:1;display:flex;flex-direction:column;overflow:hidden;background:#f5f5f3;min-width:0}
+.chat-hdr{padding:10px 20px;font-size:12px;color:#aaa;border-bottom:1px solid #e5e5e3;background:#fff;flex-shrink:0}
+.chat-messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px}
+.msg-user{align-self:flex-end;background:#1a1a1a;color:#fff;padding:9px 14px;border-radius:16px 16px 4px 16px;max-width:72%;font-size:13px;line-height:1.5}
+.msg-ai{align-self:flex-start;background:#fff;border:1px solid #e5e5e3;padding:12px 16px;border-radius:4px 16px 16px 16px;max-width:84%;font-size:13px;line-height:1.65;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.msg-ai b,.msg-ai strong{font-weight:600}
+.msg-loading{align-self:flex-start;padding:10px 14px;color:#bbb;font-size:13px;display:flex;align-items:center;gap:4px}
+.dot-pulse{display:inline-flex;gap:3px}
+.dot-pulse span{width:5px;height:5px;border-radius:50%;background:#bbb;animation:dp 1.2s infinite}
+.dot-pulse span:nth-child(2){animation-delay:.2s}
+.dot-pulse span:nth-child(3){animation-delay:.4s}
+@keyframes dp{0%,80%,100%{opacity:.2}40%{opacity:1}}
+.chat-input-wrap{flex-shrink:0;padding:12px 16px;background:#fff;border-top:1px solid #e5e5e3}
+.chat-input-row{display:flex;gap:8px;align-items:flex-end}
+.chat-ta{flex:1;border:1px solid #ddd;border-radius:10px;padding:8px 12px;font-size:13px;line-height:1.5;resize:none;outline:none;max-height:120px;transition:border .15s;background:#fff}
+.chat-ta:focus{border-color:#999}
+.chat-send{width:34px;height:34px;border-radius:50%;background:#1a1a1a;color:#fff;border:none;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:15px;transition:background .15s}
+.chat-send:hover{background:#333}
+.chat-send:disabled{background:#ccc;cursor:not-allowed}
+
+/* === Right sidebar === */
+.sidebar-right{width:272px;background:#fff;border-left:1px solid #e5e5e3;flex-shrink:0;display:flex;flex-direction:column;overflow:hidden}
+.right-threads{flex:1;overflow-y:auto}
+.right-title{font-size:11px;font-weight:600;color:#999;letter-spacing:.06em;text-transform:uppercase;padding:12px 16px 6px}
+.thread-card{padding:10px 14px;border-bottom:1px solid #f0f0ee;cursor:pointer;transition:background .1s;display:flex;align-items:flex-start;gap:8px}
+.thread-card:hover{background:#fafafa}
+.tc-dot{width:7px;height:7px;border-radius:50%;background:#d1d5db;flex-shrink:0;margin-top:4px}
+.tc-dot.active{background:#22c55e}
+.tc-name{font-weight:600;font-size:12px;color:#1a1a1a;line-height:1.3}
+.tc-focus{font-size:11px;color:#888;margin-top:2px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tc-badges{display:flex;gap:4px;margin-top:5px;flex-wrap:wrap}
+.tc-badge{font-size:10px;padding:1px 6px;border-radius:10px;font-weight:500}
+.tc-badge-q{background:#fef3c7;color:#92400e}
+.tc-badge-a{background:#dbeafe;color:#1e40af}
+.tc-badge-r{background:#f3f4f6;color:#6b7280}
+.no-threads{padding:16px;font-size:12px;color:#aaa;text-align:center}
+
+/* Run section */
+.run-section{padding:12px 14px;border-top:1px solid #e5e5e3;flex-shrink:0}
+.run-lbl{font-size:11px;font-weight:600;color:#999;letter-spacing:.06em;text-transform:uppercase;margin-bottom:7px}
+.run-sel{width:100%;border:1px solid #ddd;border-radius:6px;padding:5px 7px;font-size:12px;margin-bottom:5px;background:#fff;outline:none}
+.run-topic{width:100%;border:1px solid #ddd;border-radius:6px;padding:5px 7px;font-size:12px;margin-bottom:7px;background:#fff;outline:none}
+.run-topic::placeholder{color:#bbb}
+.btn-run{width:100%;padding:8px;font-size:13px;font-weight:600;background:#1a1a1a;color:#fff;border:none;border-radius:7px;transition:background .15s}
+.btn-run:hover{background:#333}
+.btn-run:disabled{background:#aaa;cursor:not-allowed}
+.run-ind{font-size:11px;color:#666;margin-top:5px;display:none;text-align:center}
+.run-ind.show{display:block}
+
+/* === Overlay panels === */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:200;display:none;align-items:flex-start;justify-content:flex-end}
+.overlay.open{display:flex}
+.panel{background:#fff;width:560px;height:100vh;overflow-y:auto;padding:24px;box-shadow:-4px 0 24px rgba(0,0,0,.08)}
+.panel-close{float:right;font-size:20px;border:none;background:none;color:#888;cursor:pointer;padding:0 4px}
+.panel-title{font-size:17px;font-weight:600;margin-bottom:4px}
+.panel-sub{font-size:12px;color:#888;margin-bottom:16px}
+
+/* Detail panel internals */
+.dp-section{margin-bottom:18px}
+.dp-sec-title{font-size:11px;font-weight:600;color:#999;letter-spacing:.06em;text-transform:uppercase;margin-bottom:7px}
+.focus-box{background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:10px 12px;font-size:13px;color:#1e3a5f;margin-bottom:12px;line-height:1.5}
+.edit-row{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:6px;background:#f9f9f7;margin-bottom:4px}
+.edit-row:hover{background:#f0f0ee}
+.edit-text{flex:1;font-size:13px;color:#333;line-height:1.5;min-width:0;word-break:break-word}
+.item-done .edit-text{text-decoration:line-through;color:#aaa}
+.icon-btn{border:none;background:none;cursor:pointer;font-size:14px;color:#bbb;padding:0 2px;line-height:1;flex-shrink:0;margin-top:1px}
+.icon-btn:hover{color:#555}
+.icon-btn-g:hover{color:#16a34a}
+.icon-btn-b:hover{color:#2563eb}
+.dp-divider{height:1px;background:#f0f0ee;margin:14px 0}
+.new-info-area{width:100%;border:1px solid #ddd;border-radius:6px;padding:8px 10px;font-size:13px;resize:vertical;min-height:70px;outline:none}
+.add-row{display:flex;gap:6px;margin-top:7px}
+.add-input{flex:1;border:1px solid #ddd;border-radius:6px;padding:5px 8px;font-size:12px;outline:none}
+
+/* History entry */
+.hist-entry{padding:8px 10px;border-radius:6px;border:1px solid #e5e5e3;margin-bottom:6px}
+.hist-entry.discarded{background:#f9f9f7;border-color:#f0f0ee;opacity:.55}
 </style>
 </head>
 <body>
 
+<!-- Top bar -->
 <div class="topbar">
-  <div class="topbar-left">
-    <span class="logo">Cratus Email Automation</span>
-    <span class="status-dot" id="statusDot"></span>
-    <span class="status-label" id="statusLabel">Loading...</span>
+  <span class="logo">Cratus</span>
+  <div class="tb-div"></div>
+  <div class="stat-pill">
+    <span class="stat-dot" id="schedDot"></span>
+    <span id="schedLabel">Loading...</span>
   </div>
-  <div class="topbar-right">
+  <div class="tb-div"></div>
+  <div class="stat-pill">📅 <span id="statToday">—</span> today</div>
+  <div class="stat-pill">⏱ Next: <span id="statNext">—</span></div>
+  <div class="tb-right">
     <span class="saved-msg" id="savedMsg">Saved</span>
   </div>
 </div>
 
-<div class="main">
+<!-- Workspace -->
+<div class="workspace">
 
-  <!-- Stats -->
-  <div class="stats">
-    <div class="stat-card">
-      <div class="stat-n" id="statRunsToday">—</div>
-      <div class="stat-l">Scheduled today</div>
+<!-- Left sidebar -->
+<div class="sidebar-left">
+
+  <div>
+    <div class="sec-hdr" onclick="toggleSec('Schedule')">
+      <span class="sec-title">Schedule & Flow</span>
+      <span class="sec-chev" id="chevSchedule">▶</span>
     </div>
-    <div class="stat-card">
-      <div class="stat-n" id="statNextRun">—</div>
-      <div class="stat-l">Next run</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-n" id="statThreadRun">—</div>
-      <div class="stat-l">Active thread progress</div>
+    <div class="sec-body" id="bodySchedule">
+      <div class="field-row">
+        <span class="field-lbl">Enabled</span>
+        <label class="toggle"><input type="checkbox" id="cfgEnabled"><span class="slider"></span></label>
+      </div>
+      <div class="field-row">
+        <span class="field-lbl">Subject</span>
+        <input type="text" id="cfgSubject" style="width:128px">
+      </div>
+      <div class="field-row">
+        <span class="field-lbl">Window (ET)</span>
+        <div style="display:flex;gap:2px;align-items:center">
+          <input type="time" id="cfgWinStart" style="width:74px">
+          <span style="color:#bbb;font-size:11px;padding:0 2px">–</span>
+          <input type="time" id="cfgWinEnd" style="width:74px">
+        </div>
+      </div>
+      <div class="field-row">
+        <span class="field-lbl">Runs/day</span>
+        <div style="display:flex;gap:2px;align-items:center">
+          <input type="number" id="cfgRunsMin" min="1" max="10" style="width:40px">
+          <span style="color:#bbb;font-size:11px;padding:0 2px">–</span>
+          <input type="number" id="cfgRunsMax" min="1" max="10" style="width:40px">
+        </div>
+      </div>
+      <div class="field-row">
+        <span class="field-lbl">Min gap (min)</span>
+        <input type="number" id="cfgGap" min="10" max="480" style="width:56px">
+      </div>
+      <div class="field-row">
+        <span class="field-lbl">Rounds</span>
+        <div style="display:flex;gap:2px;align-items:center">
+          <input type="number" id="cfgRoundsMin" min="1" max="20" style="width:40px">
+          <span style="color:#bbb;font-size:11px;padding:0 2px">–</span>
+          <input type="number" id="cfgRoundsMax" min="1" max="20" style="width:40px">
+        </div>
+      </div>
+      <div class="save-row"><button class="btn btn-primary btn-sm" onclick="saveConfig()">Save</button></div>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f0f0ee">
+        <div style="font-size:11px;color:#aaa;margin-bottom:5px">Today's slots</div>
+        <div id="schedMini"><span style="font-size:11px;color:#bbb">Loading...</span></div>
+      </div>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f0f0ee">
+        <div style="font-size:11px;color:#aaa;margin-bottom:5px">Recent runs</div>
+        <div id="runLogMini"><span style="font-size:11px;color:#bbb">Loading...</span></div>
+      </div>
     </div>
   </div>
 
-  <div class="cols">
-    <!-- Left column -->
-    <div>
-
-      <!-- Config -->
-      <div class="card">
-        <div class="card-title">Schedule &amp; flow</div>
-
-        <div class="field">
-          <span class="field-label">Scheduler enabled</span>
-          <label class="toggle">
-            <input type="checkbox" id="cfgEnabled">
-            <span class="slider"></span>
-          </label>
-        </div>
-
-        <div class="field">
-          <span class="field-label">Email subject</span>
-          <input type="text" id="cfgSubject">
-        </div>
-
-        <div class="field">
-          <span class="field-label">Send window (ET)</span>
-          <div class="field-right">
-            <input type="time" id="cfgWinStart">
-            <span style="color:#aaa;font-size:12px">to</span>
-            <input type="time" id="cfgWinEnd">
-          </div>
-        </div>
-
-        <div class="field">
-          <span class="field-label">Runs per day</span>
-          <div class="field-right">
-            <input type="number" id="cfgRunsMin" min="1" max="10">
-            <span style="color:#aaa;font-size:12px">–</span>
-            <input type="number" id="cfgRunsMax" min="1" max="10">
-          </div>
-        </div>
-
-        <div class="field">
-          <span class="field-label">Min gap between runs (min)</span>
-          <input type="number" id="cfgGap" min="10" max="480" style="width:70px">
-        </div>
-
-        <div class="field">
-          <span class="field-label">Rounds per session</span>
-          <div class="field-right">
-            <input type="number" id="cfgRoundsMin" min="1" max="20">
-            <span style="color:#aaa;font-size:12px">–</span>
-            <input type="number" id="cfgRoundsMax" min="1" max="20">
-          </div>
-        </div>
-
-        <div class="save-row">
-          <button class="btn btn-primary" onclick="saveConfig()">Save changes</button>
-        </div>
-      </div>
-
-      <!-- Threads -->
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-          <div class="card-title" style="margin-bottom:0">Deal threads</div>
-          <button class="btn btn-primary btn-sm" onclick="openNewThread()">+ New thread</button>
-        </div>
-        <div id="threadsList"><span style="color:#aaa;font-size:13px">Loading...</span></div>
-      </div>
-
-      <!-- Agents -->
-      <div class="card">
-        <div class="card-title">Agent personalities</div>
-        <div id="agentsList"><span style="color:#aaa;font-size:13px">Loading...</span></div>
-      </div>
-
+  <div>
+    <div class="sec-hdr" onclick="toggleSec('Agents')">
+      <span class="sec-title">Agents</span>
+      <span class="sec-chev" id="chevAgents">▶</span>
     </div>
+    <div class="sec-body" id="bodyAgents">
+      <div id="agentsList"><span style="color:#bbb;font-size:12px">Loading...</span></div>
+    </div>
+  </div>
 
-    <!-- Right column -->
-    <div>
+  <div>
+    <div class="sec-hdr" onclick="toggleSec('Threads')">
+      <span class="sec-title">Threads</span>
+      <span class="sec-chev" id="chevThreads">▶</span>
+    </div>
+    <div class="sec-body" id="bodyThreads">
+      <button class="btn btn-primary btn-sm" onclick="openNewThread()" style="width:100%;margin-bottom:10px">+ New thread</button>
+      <div id="threadsMgmt"><span style="color:#bbb;font-size:12px">Loading...</span></div>
+    </div>
+  </div>
 
-      <!-- Run Now -->
-      <div class="card">
-        <div class="card-title">Run now</div>
-        <div class="field" style="padding:6px 0">
-          <span class="field-label">Thread</span>
-          <select id="runThread" style="border:1px solid #ddd;border-radius:6px;padding:4px 8px;font-size:13px;background:#fff;color:#1a1a1a;width:190px;outline:none">
-            <option value="">— select thread —</option>
-          </select>
-        </div>
-        <div class="field" style="padding:6px 0;border-bottom:none">
-          <span class="field-label" style="flex-shrink:0">Topic <span style="color:#aaa;font-weight:400">(optional)</span></span>
-          <input type="text" id="runTopic" placeholder="Override focus for this run..." style="width:190px">
-        </div>
-        <div style="margin-top:12px">
-          <button class="btn-run" id="runBtn" onclick="triggerRun()">▶ Run now</button>
-          <div class="run-indicator" id="runIndicator">⏳ Run in progress...</div>
-        </div>
-      </div>
+</div>
 
-      <!-- Today's schedule -->
-      <div class="card">
-        <div class="card-title">Today's schedule</div>
-        <div id="scheduleList"><span style="color:#aaa;font-size:13px">Loading...</span></div>
-      </div>
-
-      <!-- Run history -->
-      <div class="card">
-        <div class="card-title">Recent runs</div>
-        <div id="runLog"><span style="color:#aaa;font-size:13px">Loading...</span></div>
-      </div>
-
+<!-- Chat center -->
+<div class="chat-main">
+  <div class="chat-hdr">
+    Ask anything about your deals, or tell me what to change — I can read and update all thread data.
+  </div>
+  <div class="chat-messages" id="chatMessages"></div>
+  <div class="chat-input-wrap">
+    <div class="chat-input-row">
+      <textarea class="chat-ta" id="chatInput" rows="1"
+        placeholder="What are the open questions on Washington RV Park? / Add a fact to [thread]: …"
+        onkeydown="chatKeydown(event)" oninput="autoResize(this)"></textarea>
+      <button class="chat-send" id="chatSendBtn" onclick="sendChat()">↑</button>
     </div>
   </div>
 </div>
 
-<!-- New thread modal -->
-<div class="detail-overlay" id="newThreadOverlay" onclick="closeNewThreadOverlay(event)">
-  <div class="detail-panel" id="newThreadPanel">
-    <button class="detail-close" onclick="closeNewThread()">✕</button>
-    <h2 style="font-size:17px;font-weight:600;margin-bottom:4px">New deal thread</h2>
-    <p style="font-size:12px;color:#888;margin-bottom:16px">Paste any listing info, due diligence notes, or raw data. Claude will auto-structure it into a thread.</p>
-    <div class="field" style="padding:6px 0;border-bottom:none;margin-bottom:10px">
-      <span class="field-label">Thread name</span>
-      <input type="text" id="newThreadName" placeholder="e.g. Sequim RV Park" style="width:280px">
+<!-- Right sidebar -->
+<div class="sidebar-right">
+  <div class="right-threads">
+    <div class="right-title">Deal threads</div>
+    <div id="threadCards"><div class="no-threads">Loading...</div></div>
+  </div>
+  <div class="run-section">
+    <div class="run-lbl">Run now</div>
+    <select class="run-sel" id="runThread"><option value="">— select thread —</option></select>
+    <input class="run-topic" type="text" id="runTopic" placeholder="Topic override (optional)">
+    <button class="btn-run" id="runBtn" onclick="triggerRun()">▶ Run now</button>
+    <div class="run-ind" id="runInd">⏳ Running...</div>
+  </div>
+</div>
+
+</div>
+
+<!-- Auth overlay -->
+<div class="overlay" id="authOverlay" onclick="closeAuthOverlay(event)">
+  <div class="panel" style="width:440px;height:auto;min-height:280px">
+    <button class="panel-close" onclick="closeAuth()">✕</button>
+    <h2 class="panel-title" id="authTitle">Authorize Outlook</h2>
+    <p class="panel-sub">Sign in to Microsoft so this bot can send and receive emails.</p>
+    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin-bottom:12px">
+      <p style="font-size:13px;font-weight:600;margin-bottom:6px">Step 1</p>
+      <p style="font-size:13px;margin-bottom:12px">Open <a href="https://microsoft.com/devicelogin" target="_blank" style="color:#2563eb;font-weight:600">microsoft.com/devicelogin</a></p>
+      <p style="font-size:13px;font-weight:600;margin-bottom:4px">Step 2 — Enter this code:</p>
+      <div style="font-size:26px;font-weight:700;letter-spacing:4px;color:#1a1a1a;font-family:monospace;margin:8px 0;padding:12px;background:#fff;border:2px solid #e5e5e3;border-radius:6px;text-align:center" id="authCode">—</div>
     </div>
-    <textarea id="newThreadContent" style="width:100%;min-height:300px;border:1px solid #ddd;border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.6;resize:vertical;outline:none" placeholder="Paste listing URL content, broker notes, property details, financials..."></textarea>
+    <div style="font-size:13px;color:#555;margin-bottom:4px" id="authStatusMsg">⏳ Starting...</div>
+    <div style="font-size:11px;color:#aaa" id="authExpiry"></div>
+  </div>
+</div>
+
+<!-- New thread overlay -->
+<div class="overlay" id="newThreadOverlay" onclick="closeNewThreadOverlay(event)">
+  <div class="panel" id="newThreadPanel">
+    <button class="panel-close" onclick="closeNewThread()">✕</button>
+    <h2 class="panel-title">New deal thread</h2>
+    <p class="panel-sub">Paste any listing info — Claude will auto-structure it.</p>
+    <div class="field-row" style="margin-bottom:10px;border:none">
+      <span class="field-lbl">Thread name</span>
+      <input type="text" id="newThreadName" placeholder="e.g. Sequim RV Park" style="width:240px">
+    </div>
+    <textarea id="newThreadContent" style="width:100%;min-height:260px;border:1px solid #ddd;border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.6;resize:vertical;outline:none" placeholder="Paste listing content, broker notes, financials..."></textarea>
     <div id="newThreadStatus" style="font-size:12px;color:#888;margin-top:8px;min-height:18px"></div>
     <div style="text-align:right;margin-top:10px">
       <button class="btn btn-primary" id="newThreadBtn" onclick="createThread()">Create thread</button>
@@ -942,745 +1225,351 @@ input:checked+.slider:before{transform:translateX(16px)}
   </div>
 </div>
 
-<!-- Prompt editor modal -->
-<div class="detail-overlay" id="promptOverlay" onclick="closePromptOverlay(event)">
-  <div class="detail-panel" id="promptPanel">
-    <button class="detail-close" onclick="closePromptPanel()">✕</button>
+<!-- Prompt editor overlay -->
+<div class="overlay" id="promptOverlay" onclick="closePromptOverlay(event)">
+  <div class="panel" id="promptPanel">
+    <button class="panel-close" onclick="closePromptPanel()">✕</button>
     <div id="promptContent"></div>
   </div>
 </div>
 
-<!-- Auth modal -->
-<div class="detail-overlay" id="authOverlay" onclick="closeAuthOverlay(event)">
-  <div class="detail-panel" style="width:440px;height:auto;min-height:300px">
-    <button class="detail-close" onclick="closeAuth()">✕</button>
-    <h2 style="font-size:17px;font-weight:600;margin-bottom:6px" id="authTitle">Authorize Outlook</h2>
-    <p style="font-size:12px;color:#888;margin-bottom:16px">Sign in to Microsoft so this bot can send and receive emails via Outlook.</p>
-    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin-bottom:14px">
-      <p style="font-size:13px;font-weight:600;margin-bottom:6px">Step 1</p>
-      <p style="font-size:13px;margin-bottom:12px">Open <a href="https://microsoft.com/devicelogin" target="_blank" style="color:#2563eb;font-weight:600">microsoft.com/devicelogin</a> in a browser</p>
-      <p style="font-size:13px;font-weight:600;margin-bottom:4px">Step 2 — Enter this code:</p>
-      <div style="font-size:28px;font-weight:700;letter-spacing:4px;color:#1a1a1a;font-family:monospace;margin:8px 0;padding:12px;background:#fff;border:2px solid #e5e5e3;border-radius:6px;text-align:center" id="authCode">—</div>
-      <p style="font-size:12px;color:#666;margin-top:8px">Sign in with the email for this bot and approve the permissions.</p>
-    </div>
-    <div style="font-size:13px;color:#555;margin-bottom:6px" id="authStatusMsg">⏳ Starting...</div>
-    <div style="font-size:11px;color:#aaa" id="authExpiry"></div>
-  </div>
-</div>
-
-<!-- Thread detail panel -->
-<div class="detail-overlay" id="detailOverlay" onclick="closeDetail(event)">
-  <div class="detail-panel" id="detailPanel">
-    <button class="detail-close" onclick="closeDetailPanel()">✕</button>
+<!-- Thread detail overlay -->
+<div class="overlay" id="detailOverlay" onclick="closeDetailOverlay(event)">
+  <div class="panel" id="detailPanel">
+    <button class="panel-close" onclick="closeDetailPanel()">✕</button>
     <div id="detailContent"></div>
   </div>
 </div>
 
 <script>
-// ---------------------------------------------------------------------------
 // State
-// ---------------------------------------------------------------------------
-let _runPolling = null;
+let _chatHistory = [];
+let _chatPending = false;
+let _runPolling  = null;
+let _td = null, _tdId = null;
+let _editingBotId = null;
+let _authBotId = null, _authPolling = null;
 
-// ---------------------------------------------------------------------------
 // Boot
-// ---------------------------------------------------------------------------
 async function boot() {
-  await Promise.all([loadConfig(), loadThreads(), loadSchedule(), loadRunLog(), loadBots()]);
+  await Promise.all([loadConfig(), loadThreadCards(), loadSchedMini(), loadRunLogMini(), loadBots()]);
   await loadAuthStatus();
   pollRunStatus();
-  setInterval(() => {
-    loadSchedule();
-    loadRunLog();
-    loadThreads();
-    pollRunStatus();
-    loadAuthStatus();
-  }, 30000);
+  appendAiMsg("Hi! I can answer questions about your deal threads and make changes for you.\n\nTry:\n• \"What are the open questions on Washington RV Park?\"\n• \"Add a fact to [thread]: the NOI is $180k\"\n• \"Mark action 2 as done on [thread]\"");
+  setInterval(() => { loadSchedMini(); loadRunLogMini(); loadThreadCards(); pollRunStatus(); loadAuthStatus(); }, 30000);
 }
 
-// ---------------------------------------------------------------------------
 // Config
-// ---------------------------------------------------------------------------
 async function loadConfig() {
   const d = await fetch('/api/config').then(r => r.json());
-  document.getElementById('cfgEnabled').checked     = d.schedule_enabled;
-  document.getElementById('cfgSubject').value       = d.subject;
-  document.getElementById('cfgWinStart').value      = d.window_start;
-  document.getElementById('cfgWinEnd').value        = d.window_end;
-  document.getElementById('cfgRunsMin').value       = d.runs_min;
-  document.getElementById('cfgRunsMax').value       = d.runs_max;
-  document.getElementById('cfgGap').value           = d.min_gap;
-  document.getElementById('cfgRoundsMin').value     = d.rounds_min;
-  document.getElementById('cfgRoundsMax').value     = d.rounds_max;
-  updateStatusBadge(d.schedule_enabled);
+  document.getElementById('cfgEnabled').checked = d.schedule_enabled;
+  document.getElementById('cfgSubject').value = d.subject;
+  document.getElementById('cfgWinStart').value = d.window_start;
+  document.getElementById('cfgWinEnd').value = d.window_end;
+  document.getElementById('cfgRunsMin').value = d.runs_min;
+  document.getElementById('cfgRunsMax').value = d.runs_max;
+  document.getElementById('cfgGap').value = d.min_gap;
+  document.getElementById('cfgRoundsMin').value = d.rounds_min;
+  document.getElementById('cfgRoundsMax').value = d.rounds_max;
+  updateTopbar(d.schedule_enabled);
 }
-
 async function saveConfig() {
-  const payload = {
+  const p = {
     schedule_enabled: document.getElementById('cfgEnabled').checked,
-    subject:      document.getElementById('cfgSubject').value,
+    subject: document.getElementById('cfgSubject').value,
     window_start: document.getElementById('cfgWinStart').value,
-    window_end:   document.getElementById('cfgWinEnd').value,
-    runs_min:     parseInt(document.getElementById('cfgRunsMin').value),
-    runs_max:     parseInt(document.getElementById('cfgRunsMax').value),
-    min_gap:      parseInt(document.getElementById('cfgGap').value),
-    rounds_min:   parseInt(document.getElementById('cfgRoundsMin').value),
-    rounds_max:   parseInt(document.getElementById('cfgRoundsMax').value),
+    window_end: document.getElementById('cfgWinEnd').value,
+    runs_min: parseInt(document.getElementById('cfgRunsMin').value),
+    runs_max: parseInt(document.getElementById('cfgRunsMax').value),
+    min_gap: parseInt(document.getElementById('cfgGap').value),
+    rounds_min: parseInt(document.getElementById('cfgRoundsMin').value),
+    rounds_max: parseInt(document.getElementById('cfgRoundsMax').value),
   };
-  await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-  const msg = document.getElementById('savedMsg');
-  msg.classList.add('show');
-  setTimeout(() => msg.classList.remove('show'), 2000);
-  updateStatusBadge(payload.schedule_enabled);
-  loadSchedule();
+  await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)});
+  showSaved('Saved'); updateTopbar(p.schedule_enabled); loadSchedMini();
+}
+function updateTopbar(enabled) {
+  document.getElementById('schedDot').className = 'stat-dot' + (enabled ? '' : ' off');
+  document.getElementById('schedLabel').textContent = enabled ? 'Scheduler ON' : 'Scheduler OFF';
 }
 
-function updateStatusBadge(enabled) {
-  const dot   = document.getElementById('statusDot');
-  const label = document.getElementById('statusLabel');
-  dot.style.background   = enabled ? '#22c55e' : '#d1d5db';
-  label.textContent      = enabled ? 'Scheduler active' : 'Scheduler paused';
+// Schedule mini
+async function loadSchedMini() {
+  const slots = await fetch('/api/schedule/today').then(r => r.json());
+  const el = document.getElementById('schedMini');
+  document.getElementById('statToday').textContent = slots.length || '—';
+  const next = slots.find(s => !s.past);
+  document.getElementById('statNext').textContent = next ? next.time : (slots.length ? 'Done' : '—');
+  if (!slots.length) { el.innerHTML = '<span style="font-size:11px;color:#bbb">None today</span>'; return; }
+  el.innerHTML = slots.map(s => `<div class="sched-mini-row">
+    <span class="sched-dot-m" style="background:${s.past?'#d1d5db':'#22c55e'}"></span>
+    <span style="font-size:11px;${s.past?'color:#bbb;text-decoration:line-through':'color:#444'}">${s.time}</span>
+  </div>`).join('');
 }
 
-// ---------------------------------------------------------------------------
-// Threads
-// ---------------------------------------------------------------------------
-async function loadThreads() {
+// Run log mini
+async function loadRunLogMini() {
+  const log = await fetch('/api/runlog').then(r => r.json());
+  const el = document.getElementById('runLogMini');
+  if (!log.length) { el.innerHTML = '<span style="font-size:11px;color:#bbb">No runs yet</span>'; return; }
+  el.innerHTML = log.slice(0,4).map(r => {
+    const dt = r.started_at ? new Date(r.started_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '—';
+    const col = r.status==='completed'?'#16a34a':r.status==='error'?'#dc2626':'#aaa';
+    return `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:11px"><span style="color:#555">${dt}</span><span style="color:${col};font-weight:500">${r.status}</span></div>`;
+  }).join('');
+}
+
+// Thread cards (right sidebar)
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+async function loadThreadCards() {
   const threads = await fetch('/api/threads').then(r => r.json());
-  const el = document.getElementById('threadsList');
-  if (!threads.length) { el.innerHTML = '<span style="color:#aaa;font-size:13px">No threads yet. Click "+ New thread" to add one.</span>'; return; }
-
-  const active = threads.find(t => t.is_active);
-  if (active) document.getElementById('statThreadRun').textContent = `Run ${active.run_count}`;
-
-  // Populate run-thread dropdown (active threads only)
+  const el = document.getElementById('threadCards');
+  if (!threads.length) {
+    el.innerHTML = '<div class="no-threads">No threads yet.<br><button class="btn btn-primary btn-sm" onclick="openNewThread()" style="margin-top:8px">+ New thread</button></div>';
+  } else {
+    el.innerHTML = threads.map(t => `
+      <div class="thread-card" onclick="openDetail('${t.id}')">
+        <span class="tc-dot ${t.is_active?'active':''}"></span>
+        <div style="min-width:0;flex:1">
+          <div class="tc-name">${esc(t.name)}</div>
+          <div class="tc-focus">${esc(t.discussion_focus || t.stage || '—')}</div>
+          <div class="tc-badges">
+            <span class="tc-badge tc-badge-r">Run ${t.run_count}</span>
+            ${t.open_questions?`<span class="tc-badge tc-badge-q">${t.open_questions} Q</span>`:''}
+            ${t.open_actions?`<span class="tc-badge tc-badge-a">${t.open_actions} ✓</span>`:''}
+          </div>
+        </div>
+      </div>`).join('');
+  }
   const sel = document.getElementById('runThread');
   const prev = sel.value;
+  const active = threads.filter(t => t.is_active);
   sel.innerHTML = '<option value="">— select thread —</option>' +
-    threads.filter(t => t.is_active).map(t =>
-      `<option value="${t.id}" ${t.id === prev ? 'selected' : ''}>${t.name}</option>`
-    ).join('');
-  // Auto-select first active if nothing chosen
-  if (!sel.value && threads.filter(t => t.is_active).length) {
-    sel.value = threads.filter(t => t.is_active)[0].id;
-  }
+    active.map(t => `<option value="${t.id}" ${t.id===prev?'selected':''}>${esc(t.name)}</option>`).join('');
+  if (!sel.value && active.length) sel.value = active[0].id;
+  const mgmt = document.getElementById('threadsMgmt');
+  mgmt.innerHTML = threads.length ? threads.map(t => `
+    <div class="tmgmt-row">
+      <label class="toggle" style="flex-shrink:0">
+        <input type="checkbox" ${t.is_active?'checked':''} onchange="toggleActive('${t.id}',this.checked)">
+        <span class="slider"></span>
+      </label>
+      <span class="tmgmt-name">${esc(t.name)}</span>
+      <button class="btn btn-sm" onclick="openDetail('${t.id}')" style="flex-shrink:0">View</button>
+    </div>`).join('') : '<span style="color:#bbb;font-size:12px">No threads</span>';
+}
 
-  el.innerHTML = threads.map(t => `
-    <div class="thread-row">
-      <div style="display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0">
-        <label class="toggle" style="margin-top:2px;flex-shrink:0" title="Set active">
-          <input type="checkbox" ${t.is_active ? 'checked' : ''} onchange="toggleActive('${t.id}', this.checked)">
-          <span class="slider"></span>
-        </label>
-        <div style="min-width:0">
-          <div class="thread-name">${t.name}</div>
-          <div class="thread-meta">${t.stage} · Run ${t.run_count}</div>
-          ${t.discussion_focus ? `<div style="font-size:11px;color:#666;margin-top:3px;max-width:300px;line-height:1.4">${t.discussion_focus}</div>` : ''}
+// Sidebar toggle
+function toggleSec(name) {
+  document.getElementById('body'+name).classList.toggle('open');
+  document.getElementById('chev'+name).classList.toggle('open');
+}
+
+// Chat
+function fmtAi(text){return esc(text).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/\n/g,'<br>')}
+function appendUserMsg(text){const el=document.createElement('div');el.className='msg-user';el.textContent=text;document.getElementById('chatMessages').appendChild(el);scrollChat()}
+function appendAiMsg(text){const el=document.createElement('div');el.className='msg-ai';el.innerHTML=fmtAi(text);document.getElementById('chatMessages').appendChild(el);scrollChat();return el}
+function showChatLoading(){const el=document.createElement('div');el.className='msg-loading';el.id='chatLoading';el.innerHTML='<div class="dot-pulse"><span></span><span></span><span></span></div>';document.getElementById('chatMessages').appendChild(el);scrollChat()}
+function removeChatLoading(){const el=document.getElementById('chatLoading');if(el)el.remove()}
+function scrollChat(){const el=document.getElementById('chatMessages');el.scrollTop=el.scrollHeight}
+function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px'}
+function chatKeydown(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat()}}
+
+async function sendChat() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text || _chatPending) return;
+  input.value=''; input.style.height='auto';
+  _chatPending=true; document.getElementById('chatSendBtn').disabled=true;
+  appendUserMsg(text);
+  _chatHistory.push({role:'user',content:text});
+  showChatLoading();
+  try {
+    const res = await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:_chatHistory})});
+    const data = await res.json();
+    removeChatLoading();
+    if (!res.ok) {
+      appendAiMsg('❌ '+(data.error||'Something went wrong.'));
+    } else {
+      const reply = data.reply || '(no response)';
+      appendAiMsg(reply);
+      _chatHistory.push({role:'assistant',content:reply});
+      if(_chatHistory.length>40)_chatHistory=_chatHistory.slice(-40);
+      if (data.actions_taken && data.actions_taken.length) {
+        loadThreadCards();
+        if (_tdId) { _td=await fetch('/api/threads/'+_tdId).then(r=>r.json()); renderDetail(); }
+      }
+    }
+  } catch(e) { removeChatLoading(); appendAiMsg('❌ Network error.'); }
+  _chatPending=false; document.getElementById('chatSendBtn').disabled=false;
+  document.getElementById('chatInput').focus();
+}
+
+// Run now
+async function triggerRun() {
+  const tid = document.getElementById('runThread').value;
+  const topic = document.getElementById('runTopic').value.trim();
+  if (!tid) { alert('Please select a thread.'); return; }
+  const res = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thread_id:tid,topic:topic||null})});
+  if (!res.ok) { alert((await res.json()).error); return; }
+  document.getElementById('runBtn').disabled=true;
+  document.getElementById('runInd').classList.add('show');
+  startRunPoll();
+}
+function startRunPoll(){if(_runPolling)clearInterval(_runPolling);_runPolling=setInterval(pollRunStatus,3000)}
+async function pollRunStatus() {
+  const s = await fetch('/api/run/status').then(r=>r.json());
+  const btn=document.getElementById('runBtn'), ind=document.getElementById('runInd');
+  if (s.running) { btn.disabled=true; ind.classList.add('show'); }
+  else { btn.disabled=false; ind.classList.remove('show'); if(_runPolling){clearInterval(_runPolling);_runPolling=null;} loadRunLogMini(); loadThreadCards(); }
+}
+
+// Bots
+async function loadBots() {
+  const bots = await fetch('/api/bots').then(r=>r.json());
+  const el = document.getElementById('agentsList');
+  if (!bots.length) { el.innerHTML='<span style="color:#bbb;font-size:12px">No agents</span>'; return; }
+  el.innerHTML = bots.map(b=>`
+    <div class="agent-row" id="botPanel_${b.id}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div>
+          <div class="agent-name">${esc(b.name)} <span class="auth-badge auth-unauth" id="authBadge_${b.id}">—</span></div>
+          <div class="agent-email">${esc(b.email)}</div>
         </div>
+        <button class="btn btn-sm" id="authBtn_${b.id}" onclick="startAuth('${b.id}','${esc(b.name)}')" style="font-size:10px">Auth</button>
       </div>
-      <div class="thread-badges">
-        ${t.open_questions ? `<span class="badge badge-yellow">${t.open_questions} open Qs</span>` : ''}
-        ${t.open_actions ? `<span class="badge badge-blue">${t.open_actions} actions</span>` : ''}
-        <button class="btn btn-sm" onclick="openDetail('${t.id}')">View</button>
+      <div class="agent-sub">Email</div>
+      <input type="text" id="email_${b.id}" value="${esc(b.email)}" style="width:100%;border:1px solid #e0;border-radius:5px;padding:3px 6px;font-size:12px;outline:none">
+      <div class="agent-sub">Role</div>
+      <input type="text" id="role_${b.id}" value="${esc(b.role)}" style="width:100%;border:1px solid #e0;border-radius:5px;padding:3px 6px;font-size:12px;outline:none">
+      <div class="agent-sub">Style</div>
+      <input type="text" id="style_${b.id}" value="${esc(b.style)}" style="width:100%;border:1px solid #e0;border-radius:5px;padding:3px 6px;font-size:12px;outline:none">
+      <div style="display:flex;justify-content:space-between;margin-top:8px">
+        <button class="btn btn-sm" onclick="openPromptEditor('${b.id}','${esc(b.name)}')" style="font-size:10px">Edit prompt</button>
+        <button class="btn btn-primary btn-sm" onclick="saveBot('${b.id}')" style="font-size:10px">Save</button>
       </div>
     </div>`).join('');
 }
+async function saveBot(botId){const email=document.getElementById('email_'+botId).value;const role=document.getElementById('role_'+botId).value;const style=document.getElementById('style_'+botId).value;await fetch('/api/bots/'+botId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,role,style})});showSaved('Saved')}
+async function openPromptEditor(botId,botName){_editingBotId=botId;const {content}=await fetch('/api/prompts/'+botId).then(r=>r.json());document.getElementById('promptContent').innerHTML=`<h2 class="panel-title">${esc(botName)} — Prompt</h2><p class="panel-sub">Full prompt template.</p><textarea id="promptTextarea" style="width:100%;min-height:420px;border:1px solid #ddd;border-radius:6px;padding:10px;font-size:12px;font-family:monospace;line-height:1.6;resize:vertical;outline:none">${esc(content)}</textarea><div style="text-align:right;margin-top:10px"><button class="btn btn-primary" onclick="savePrompt()">Save prompt</button></div>`;document.getElementById('promptOverlay').classList.add('open')}
+async function savePrompt(){const c=document.getElementById('promptTextarea').value;await fetch('/api/prompts/'+_editingBotId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:c})});showSaved('Prompt saved')}
+function closePromptPanel(){document.getElementById('promptOverlay').classList.remove('open')}
+function closePromptOverlay(e){if(e.target===document.getElementById('promptOverlay'))closePromptPanel()}
 
-async function toggleActive(tid, checked) {
-  const threads = await fetch('/api/threads').then(r => r.json());
-  let active = threads.filter(t => t.is_active).map(t => t.id);
-  if (checked && !active.includes(tid)) active.push(tid);
-  if (!checked) active = active.filter(id => id !== tid);
-  await fetch('/api/threads/active', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({active_threads: active})
-  });
-  loadThreads();
-}
-
-// ---------------------------------------------------------------------------
-// Thread detail
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Thread detail — editable
-// ---------------------------------------------------------------------------
-let _td = null;   // current thread data in memory
-let _tdId = null; // current thread id
-
+// Thread detail panel
 async function openDetail(tid) {
-  _tdId = tid;
-  _td = await fetch(`/api/threads/${tid}`).then(r => r.json());
-  renderDetail();
-  document.getElementById('detailOverlay').classList.add('open');
+  _tdId=tid; _td=await fetch('/api/threads/'+tid).then(r=>r.json());
+  renderDetail(); document.getElementById('detailOverlay').classList.add('open');
 }
 
 function renderDetail() {
-  const t = _td;
-  const tid = _tdId;
-  const el = document.getElementById('detailContent');
-
-  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-
-  // Known facts
-  const factsHtml = (t.known_facts || []).length
-    ? (t.known_facts).map((f, i) => `
-        <div class="edit-row">
-          <span class="edit-text">${esc(f)}</span>
-          <button class="icon-btn" onclick="deleteFact(${i})" title="Delete">×</button>
-        </div>`).join('')
-    : '<p style="color:#aaa;font-size:13px">None</p>';
-
-  // Open questions
-  const questionsHtml = (t.open_questions || []).length
-    ? (t.open_questions).map((q, i) => `
-        <div class="edit-row ${q.resolved ? 'item-resolved' : ''}">
-          <span class="edit-text">${esc(q.question)}</span>
-          <div style="display:flex;gap:4px;flex-shrink:0">
-            <button class="icon-btn icon-btn-green" onclick="resolveQuestion(${i})" title="${q.resolved ? 'Unresolve' : 'Mark resolved'}">✓</button>
-            <button class="icon-btn" onclick="deleteQuestion(${i})" title="Delete">×</button>
-          </div>
-        </div>`).join('')
-    : '<p style="color:#aaa;font-size:13px">None</p>';
-
-  // Action items
-  const actionsHtml = (t.action_items || []).length
-    ? (t.action_items).map((a, i) => `
-        <div class="edit-row ${a.status === 'done' ? 'item-resolved' : ''}">
-          <div style="flex:1;min-width:0">
-            <div class="edit-text">${esc(a.item)}</div>
-            <div style="font-size:11px;color:#16a34a;margin-top:2px">→ ${esc(a.owner||'')}</div>
-          </div>
-          <div style="display:flex;gap:4px;flex-shrink:0;align-items:flex-start">
-            <button class="icon-btn icon-btn-blue" onclick="toggleAction(${i})" title="Toggle status">${a.status === 'done' ? '↺' : '✓'}</button>
-            <button class="icon-btn" onclick="deleteAction(${i})" title="Delete">×</button>
-          </div>
-        </div>`).join('')
-    : '<p style="color:#aaa;font-size:13px">None</p>';
-
-  // Decisions
-  const decisionsHtml = (t.decisions || []).length
-    ? (t.decisions).map((d, i) => `
-        <div class="edit-row">
-          <span class="edit-text">${esc(d)}</span>
-          <button class="icon-btn" onclick="deleteDecision(${i})" title="Delete">×</button>
-        </div>`).join('')
-    : '<p style="color:#aaa;font-size:13px">None</p>';
-
-  // New info queue
-  const newInfoHtml = (t.new_information || []).length
-    ? (t.new_information).map((info, i) => `
-        <div class="edit-row">
-          <span class="edit-text" style="color:#555">${esc(info)}</span>
-          <button class="icon-btn" onclick="deleteNewInfo(${i})" title="Delete">×</button>
-        </div>`).join('')
-    : '';
-
-  el.innerHTML = `
+  const t=_td, tid=_tdId, el=document.getElementById('detailContent');
+  const factsHtml=(t.known_facts||[]).length
+    ?(t.known_facts).map((f,i)=>`<div class="edit-row"><span class="edit-text">${esc(f)}</span><button class="icon-btn" onclick="deleteFact(${i})">×</button></div>`).join('')
+    :'<p style="color:#aaa;font-size:13px">None</p>';
+  const qHtml=(t.open_questions||[]).length
+    ?(t.open_questions).map((q,i)=>`<div class="edit-row ${q.resolved?'item-done':''}"><span class="edit-text">${esc(q.question)}</span><div style="display:flex;gap:3px;flex-shrink:0"><button class="icon-btn icon-btn-g" onclick="resolveQ(${i})" title="${q.resolved?'Unresolve':'Resolve'}">✓</button><button class="icon-btn" onclick="deleteQ(${i})">×</button></div></div>`).join('')
+    :'<p style="color:#aaa;font-size:13px">None</p>';
+  const aHtml=(t.action_items||[]).length
+    ?(t.action_items).map((a,i)=>`<div class="edit-row ${a.status==='done'?'item-done':''}"><div style="flex:1;min-width:0"><div class="edit-text">${esc(a.item)}</div><div style="font-size:11px;color:#16a34a;margin-top:2px">→ ${esc(a.owner||'')}</div></div><div style="display:flex;gap:3px;flex-shrink:0;align-items:flex-start"><button class="icon-btn icon-btn-b" onclick="toggleAction(${i})">${a.status==='done'?'↺':'✓'}</button><button class="icon-btn" onclick="deleteAction(${i})">×</button></div></div>`).join('')
+    :'<p style="color:#aaa;font-size:13px">None</p>';
+  const dHtml=(t.decisions||[]).length
+    ?(t.decisions).map((d,i)=>`<div class="edit-row"><span class="edit-text">${esc(d)}</span><button class="icon-btn" onclick="deleteDecision(${i})">×</button></div>`).join('')
+    :'<p style="color:#aaa;font-size:13px">None</p>';
+  const niHtml=(t.new_information||[]).length
+    ?(t.new_information).map((n,i)=>`<div class="edit-row"><span class="edit-text" style="color:#555">${esc(n)}</span><button class="icon-btn" onclick="deleteNewInfo(${i})">×</button></div>`).join(''):'';
+  const history=(t.history||[]);
+  const hasBackup=!!t._rollback_backup;
+  const histRows=history.map((h,i)=>{
+    const disc=!!h.discarded;
+    const ctrl=disc?'<span style="font-size:11px;color:#bbb">已弃用</span>':`<button class="btn btn-sm btn-danger" style="font-size:10px" onclick="rollback('${tid}',${i})">↺ 重新讨论</button>`;
+    return `<div class="hist-entry ${disc?'discarded':''}"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div style="flex:1;min-width:0"><span style="font-size:12px;font-weight:600;color:${disc?'#aaa':'#333'}">Run ${h.run} · ${h.date}</span>${h.topic?`<span style="font-size:11px;color:#2563eb;margin-left:6px">${esc(h.topic)}</span>`:''} ${h.summary?`<div style="font-size:12px;color:#555;margin-top:3px">${esc(h.summary)}</div>`:''}</div><div style="flex-shrink:0;margin-left:8px">${ctrl}</div></div></div>`;
+  }).join('');
+  el.innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
-      <h2 style="font-size:17px;font-weight:600">${esc((t.thread_id||tid).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()))}</h2>
-      <button class="btn btn-sm" style="color:#dc2626;border-color:#fca5a5" onclick="deleteThread('${tid}')">Delete</button>
+      <h2 class="panel-title">${esc((t.thread_id||tid).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()))}</h2>
+      <button class="btn btn-sm btn-danger" onclick="deleteThread('${tid}')">Delete</button>
     </div>
-    <p style="font-size:12px;color:#888;margin-bottom:14px">${esc(t.stage||'')} · Run ${(t.history||[]).length}</p>
-
-    ${t.discussion_focus ? `<div class="focus-box">Today's focus: ${esc(t.discussion_focus)}</div>` : ''}
-    ${t.last_run_summary ? `<p style="font-size:13px;color:#555;margin-bottom:14px;line-height:1.6"><em>${esc(t.last_run_summary)}</em></p>` : ''}
-
-    <div class="detail-section">
-      <div class="detail-section-title">Open questions</div>
-      ${questionsHtml}
-    </div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Action items</div>
-      ${actionsHtml}
-    </div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Decisions made</div>
-      ${decisionsHtml}
-    </div>
-
-    <div class="divider"></div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Known facts</div>
-      ${factsHtml}
-      <div style="display:flex;gap:6px;margin-top:8px">
-        <input type="text" id="newFactInput" placeholder="Add a fact..." style="flex:1;border:1px solid #ddd;border-radius:6px;padding:5px 8px;font-size:12px;outline:none">
+    <p style="font-size:12px;color:#888;margin-bottom:14px">${esc(t.stage||'')} · Run ${history.filter(h=>!h.discarded).length}</p>
+    ${t.discussion_focus?`<div class="focus-box">Focus: ${esc(t.discussion_focus)}</div>`:''}
+    ${t.last_run_summary?`<p style="font-size:13px;color:#555;margin-bottom:14px;line-height:1.6"><em>${esc(t.last_run_summary)}</em></p>`:''}
+    <div class="dp-section"><div class="dp-sec-title">Open questions</div>${qHtml}</div>
+    <div class="dp-section"><div class="dp-sec-title">Action items</div>${aHtml}</div>
+    <div class="dp-section"><div class="dp-sec-title">Decisions</div>${dHtml}</div>
+    <div class="dp-divider"></div>
+    <div class="dp-section">
+      <div class="dp-sec-title">Known facts</div>${factsHtml}
+      <div class="add-row">
+        <input class="add-input" type="text" id="newFactInput" placeholder="Add a fact...">
         <button class="btn btn-primary btn-sm" onclick="addFact()">Add</button>
       </div>
     </div>
-
-    ${newInfoHtml ? `<div class="detail-section"><div class="detail-section-title">New information queued</div>${newInfoHtml}</div>` : ''}
-
-    ${renderHistory(t)}
-
-    <div class="divider"></div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Add new information for next run</div>
-      <textarea class="new-info-area" id="newInfoText" placeholder="Paste seller reply, new data, or any update here..."></textarea>
-      <div style="margin-top:8px;text-align:right">
-        <button class="btn btn-primary" onclick="submitNewInfo()">Add to thread</button>
-      </div>
+    ${niHtml?`<div class="dp-section"><div class="dp-sec-title">New info queued</div>${niHtml}</div>`:''}
+    ${history.length?`<div class="dp-divider"></div><div class="dp-section"><div class="dp-sec-title">Run history</div><p style="font-size:11px;color:#aaa;margin-bottom:8px">↺ = 重新讨论 (回到该 run 之前). <strong>已发送邮件不受影响。</strong></p>${histRows}${hasBackup?`<div style="text-align:right;margin-top:6px"><button class="btn btn-sm" onclick="restoreThread('${tid}')">↩ 撤销回滚</button></div>`:''}</div>`:''}
+    <div class="dp-divider"></div>
+    <div class="dp-section">
+      <div class="dp-sec-title">Add new information</div>
+      <textarea class="new-info-area" id="newInfoText" placeholder="Paste update here..."></textarea>
+      <div style="margin-top:8px;text-align:right"><button class="btn btn-primary" onclick="submitNewInfo()">Add to thread</button></div>
     </div>`;
 }
 
-async function _patchThread() {
-  await fetch(`/api/threads/${_tdId}`, {
-    method: 'PATCH',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({
-      known_facts:    _td.known_facts    || [],
-      open_questions: _td.open_questions || [],
-      action_items:   _td.action_items   || [],
-      decisions:      _td.decisions      || [],
-      new_information: _td.new_information || [],
-    })
-  });
-  const msg = document.getElementById('savedMsg');
-  msg.textContent = 'Saved';
-  msg.classList.add('show');
-  setTimeout(() => { msg.classList.remove('show'); msg.textContent = 'Saved'; }, 1800);
+async function _patch(){await fetch('/api/threads/'+_tdId,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({known_facts:_td.known_facts||[],open_questions:_td.open_questions||[],action_items:_td.action_items||[],decisions:_td.decisions||[],new_information:_td.new_information||[]})});showSaved('Saved')}
+function deleteFact(i){_td.known_facts.splice(i,1);_patch();renderDetail()}
+function addFact(){const inp=document.getElementById('newFactInput');const v=inp.value.trim();if(!v)return;(_td.known_facts=_td.known_facts||[]).push(v);_patch();renderDetail()}
+function resolveQ(i){_td.open_questions[i].resolved=!_td.open_questions[i].resolved;_patch();renderDetail()}
+function deleteQ(i){_td.open_questions.splice(i,1);_patch();renderDetail()}
+function toggleAction(i){_td.action_items[i].status=_td.action_items[i].status==='done'?'open':'done';_patch();renderDetail()}
+function deleteAction(i){_td.action_items.splice(i,1);_patch();renderDetail()}
+function deleteDecision(i){_td.decisions.splice(i,1);_patch();renderDetail()}
+function deleteNewInfo(i){_td.new_information.splice(i,1);_patch();renderDetail()}
+async function submitNewInfo(){const v=document.getElementById('newInfoText').value.trim();if(!v)return;(_td.new_information=_td.new_information||[]).push(v);await _patch();renderDetail()}
+function closeDetailPanel(){document.getElementById('detailOverlay').classList.remove('open')}
+function closeDetailOverlay(e){if(e.target===document.getElementById('detailOverlay'))closeDetailPanel()}
+
+async function rollback(tid,index){
+  if(!confirm('将 Run '+(index+1)+' 及之后标记为"已弃用"，回到该 run 之前状态。\n⚠️ 已发送邮件不受影响。\n确认？'))return;
+  const res=await fetch('/api/threads/'+tid+'/rollback/'+index,{method:'POST'});
+  const d=await res.json();if(!res.ok){alert(d.error||'Failed');return;}
+  _td=await fetch('/api/threads/'+tid).then(r=>r.json());renderDetail();showSaved('已回滚');
+}
+async function restoreThread(tid){
+  if(!confirm('撤销回滚，恢复记录并还原 thread 状态？'))return;
+  const res=await fetch('/api/threads/'+tid+'/restore',{method:'POST'});
+  const d=await res.json();if(!res.ok){alert(d.error||'Failed');return;}
+  _td=await fetch('/api/threads/'+tid).then(r=>r.json());renderDetail();
 }
 
-function deleteFact(i) {
-  _td.known_facts.splice(i, 1);
-  _patchThread(); renderDetail();
-}
-function addFact() {
-  const inp = document.getElementById('newFactInput');
-  const val = inp.value.trim();
-  if (!val) return;
-  _td.known_facts = _td.known_facts || [];
-  _td.known_facts.push(val);
-  _patchThread(); renderDetail();
-}
-function resolveQuestion(i) {
-  _td.open_questions[i].resolved = !_td.open_questions[i].resolved;
-  _patchThread(); renderDetail();
-}
-function deleteQuestion(i) {
-  _td.open_questions.splice(i, 1);
-  _patchThread(); renderDetail();
-}
-function toggleAction(i) {
-  _td.action_items[i].status = _td.action_items[i].status === 'done' ? 'open' : 'done';
-  _patchThread(); renderDetail();
-}
-function deleteAction(i) {
-  _td.action_items.splice(i, 1);
-  _patchThread(); renderDetail();
-}
-function deleteDecision(i) {
-  _td.decisions.splice(i, 1);
-  _patchThread(); renderDetail();
-}
-function deleteNewInfo(i) {
-  _td.new_information.splice(i, 1);
-  _patchThread(); renderDetail();
-}
-async function submitNewInfo() {
-  const info = document.getElementById('newInfoText').value.trim();
-  if (!info) return;
-  _td.new_information = _td.new_information || [];
-  _td.new_information.push(info);
-  await _patchThread();
-  renderDetail();
+// Active toggle
+async function toggleActive(tid,checked){const threads=await fetch('/api/threads').then(r=>r.json());let active=threads.filter(t=>t.is_active).map(t=>t.id);if(checked&&!active.includes(tid))active.push(tid);if(!checked)active=active.filter(id=>id!==tid);await fetch('/api/threads/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active_threads:active})});loadThreadCards()}
+async function deleteThread(tid){if(!confirm('Delete this thread?'))return;await fetch('/api/threads/'+tid,{method:'DELETE'});closeDetailPanel();loadThreadCards()}
+
+// New thread
+function openNewThread(){document.getElementById('newThreadName').value='';document.getElementById('newThreadContent').value='';document.getElementById('newThreadStatus').textContent='';document.getElementById('newThreadBtn').disabled=false;document.getElementById('newThreadOverlay').classList.add('open')}
+function closeNewThread(){document.getElementById('newThreadOverlay').classList.remove('open')}
+function closeNewThreadOverlay(e){if(e.target===document.getElementById('newThreadOverlay'))closeNewThread()}
+async function createThread(){
+  const name=document.getElementById('newThreadName').value.trim();const content=document.getElementById('newThreadContent').value.trim();
+  if(!name||!content){alert('Fill in both fields.');return;}
+  const btn=document.getElementById('newThreadBtn'),st=document.getElementById('newThreadStatus');
+  btn.disabled=true;st.textContent='⏳ Analyzing...';
+  const res=await fetch('/api/threads/new',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,content})});
+  const data=await res.json();if(!res.ok){st.textContent='❌ '+(data.error||'Failed');btn.disabled=false;return;}
+  st.textContent='✓ Created!';setTimeout(()=>{closeNewThread();loadThreadCards();},800);
 }
 
-// ---------------------------------------------------------------------------
-// Thread history — rollback / restore
-// ---------------------------------------------------------------------------
-function renderHistory(t) {
-  const history = t.history || [];
-  if (!history.length) return '';
-  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  const hasBackup = !!t._rollback_backup;
+// Auth
+async function loadAuthStatus(){for(const id of['bot_a','bot_b','bot_c']){try{const d=await fetch('/api/auth/'+id+'/status').then(r=>r.json());const badge=document.getElementById('authBadge_'+id);const btn=document.getElementById('authBtn_'+id);if(!badge)continue;const ts=d.token_status,fs=d.flow_status;if(fs==='polling'){badge.textContent='⏳';badge.className='auth-badge auth-pending';if(btn)btn.style.display='none';}else if(ts==='connected'){badge.textContent='✓';badge.className='auth-badge auth-connected';if(btn)btn.style.display='none';}else if(ts==='expired'){badge.textContent='⚠';badge.className='auth-badge auth-expired';if(btn){btn.style.display='';btn.textContent='Re-auth';}}else{badge.textContent='✗';badge.className='auth-badge auth-unauth';if(btn){btn.style.display='';btn.textContent='Auth';}}}catch(_){}}}
+async function startAuth(botId,botName){_authBotId=botId;_clearAuthPoll();document.getElementById('authTitle').textContent='Authorize '+botName;document.getElementById('authCode').textContent='...';document.getElementById('authStatusMsg').textContent='⏳ Starting...';document.getElementById('authExpiry').textContent='';document.getElementById('authOverlay').classList.add('open');try{const res=await fetch('/api/auth/'+botId+'/start',{method:'POST'});const d=await res.json();if(!res.ok){document.getElementById('authStatusMsg').textContent='❌ '+(d.error||'Failed');return;}document.getElementById('authCode').textContent=d.user_code;document.getElementById('authStatusMsg').textContent='⏳ Waiting for sign-in...';if(d.expires_in){const exp=new Date(Date.now()+d.expires_in*1000);document.getElementById('authExpiry').textContent='Expires '+exp.toLocaleTimeString();}_authPolling=setInterval(()=>_pollAuth(botId),4000);}catch(e){document.getElementById('authStatusMsg').textContent='❌ Network error.';}}
+async function _pollAuth(botId){try{const d=await fetch('/api/auth/'+botId+'/status').then(r=>r.json());if(d.flow_status==='connected'||d.token_status==='connected'){_clearAuthPoll();document.getElementById('authStatusMsg').textContent='✅ Authorized!';document.getElementById('authCode').textContent='✓';setTimeout(()=>{closeAuth();loadAuthStatus();},1500);}else if(d.flow_status==='failed'){_clearAuthPoll();document.getElementById('authStatusMsg').textContent='❌ Failed or timed out.';}}catch(_){}}
+function _clearAuthPoll(){if(_authPolling){clearInterval(_authPolling);_authPolling=null;}}
+function closeAuth(){_clearAuthPoll();document.getElementById('authOverlay').classList.remove('open');}
+function closeAuthOverlay(e){if(e.target===document.getElementById('authOverlay'))closeAuth();}
 
-  const rows = history.map((h, i) => {
-    const discarded = !!h.discarded;
-    const topic   = h.topic   ? `<span style="font-size:11px;color:#2563eb;margin-left:6px">${esc(h.topic)}</span>` : '';
-    const summary = h.summary ? `<div style="font-size:12px;color:#555;margin-top:3px;line-height:1.4">${esc(h.summary)}</div>` : '';
-    const label   = `Run ${h.run} · ${h.date}`;
-    const controls = discarded
-      ? `<span style="font-size:11px;color:#bbb">已弃用</span>`
-      : `<button class="btn btn-sm" style="font-size:11px;color:#dc2626;border-color:#fca5a5" onclick="rollback('${t.thread_id}',${i})">↺ 重新讨论</button>`;
-    return `
-      <div style="padding:8px 10px;border-radius:6px;background:${discarded?'#f9f9f7':'#fff'};border:1px solid ${discarded?'#f0f0ee':'#e5e5e3'};margin-bottom:6px;opacity:${discarded?'0.55':'1'}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start">
-          <div style="flex:1;min-width:0">
-            <span style="font-size:12px;font-weight:600;color:${discarded?'#aaa':'#333'}">${esc(label)}</span>${topic}
-            ${summary}
-          </div>
-          <div style="flex-shrink:0;margin-left:10px">${controls}</div>
-        </div>
-      </div>`;
-  }).join('');
+// Utils
+function showSaved(msg){const el=document.getElementById('savedMsg');el.textContent=msg||'Saved';el.classList.add('show');setTimeout(()=>{el.classList.remove('show');el.textContent='Saved';},2000)}
 
-  const restoreBtn = hasBackup
-    ? `<div style="margin-top:8px;text-align:right"><button class="btn btn-sm" onclick="restoreThread('${t.thread_id}')">↩ 撤销回滚</button></div>`
-    : '';
-
-  return `
-    <div class="divider"></div>
-    <div class="detail-section">
-      <div class="detail-section-title">Run history</div>
-      <p style="font-size:11px;color:#aaa;margin-bottom:8px">↺ 重新讨论 = 回到该 run 之前的状态重新讨论。<strong>已发送的邮件不受影响。</strong></p>
-      ${rows}
-      ${restoreBtn}
-    </div>`;
-}
-
-async function rollback(tid, index) {
-  if (!confirm(`将 Run ${index+1} 及之后的记录标记为"已弃用"，thread 状态回到该 run 之前。\n\n⚠️ 已发送的邮件不受影响。\n\n确认重新讨论？`)) return;
-  const res = await fetch(`/api/threads/${tid}/rollback/${index}`, {method:'POST'});
-  const d = await res.json();
-  if (!res.ok) { alert(d.error || 'Failed'); return; }
-  // Refresh detail panel
-  _td = await fetch(`/api/threads/${tid}`).then(r => r.json());
-  renderDetail();
-  const msg = document.getElementById('savedMsg');
-  msg.textContent = '已回滚';
-  msg.classList.add('show');
-  setTimeout(() => { msg.classList.remove('show'); msg.textContent = 'Saved'; }, 2500);
-}
-
-async function restoreThread(tid) {
-  if (!confirm('撤销上次回滚，将记录恢复为"有效"，并还原 thread 状态？')) return;
-  const res = await fetch(`/api/threads/${tid}/restore`, {method:'POST'});
-  const d = await res.json();
-  if (!res.ok) { alert(d.error || 'Failed'); return; }
-  _td = await fetch(`/api/threads/${tid}`).then(r => r.json());
-  renderDetail();
-}
-
-function closeDetailPanel() {
-  document.getElementById('detailOverlay').classList.remove('open');
-}
-function closeDetail(e) {
-  if (e.target === document.getElementById('detailOverlay')) closeDetailPanel();
-}
-
-// ---------------------------------------------------------------------------
-// Schedule
-// ---------------------------------------------------------------------------
-async function loadSchedule() {
-  const slots = await fetch('/api/schedule/today').then(r => r.json());
-  const el = document.getElementById('scheduleList');
-
-  document.getElementById('statRunsToday').textContent = slots.length || '—';
-
-  const next = slots.find(s => !s.past);
-  document.getElementById('statNextRun').textContent = next ? next.time : (slots.length ? 'Done' : 'None');
-
-  if (!slots.length) {
-    el.innerHTML = '<span style="color:#aaa;font-size:13px">No sessions scheduled (weekend or disabled).</span>';
-    return;
-  }
-  el.innerHTML = slots.map(s => `
-    <div class="sched-row ${s.past ? 'sched-past' : ''}">
-      <span class="sched-dot" style="background:${s.past ? '#d1d5db' : '#22c55e'}"></span>
-      <span>${s.time}</span>
-      ${s.past ? '<span style="font-size:11px;color:#bbb">done</span>' : '<span style="font-size:11px;color:#22c55e">upcoming</span>'}
-    </div>`).join('');
-}
-
-// ---------------------------------------------------------------------------
-// Run log
-// ---------------------------------------------------------------------------
-async function loadRunLog() {
-  const log = await fetch('/api/runlog').then(r => r.json());
-  const el = document.getElementById('runLog');
-  if (!log.length) { el.innerHTML = '<span style="color:#aaa;font-size:13px">No runs yet.</span>'; return; }
-  el.innerHTML = log.map(r => {
-    const dt = r.started_at ? new Date(r.started_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '—';
-    const cls = r.status === 'completed' ? 'log-ok' : (r.status === 'error' ? 'log-err' : 'log-fail');
-    return `<div class="log-row">
-      <span>${dt}</span>
-      <div style="display:flex;align-items:center;gap:6px">
-        ${r.turns ? `<span style="font-size:11px;color:#888">${r.turns} turns</span>` : ''}
-        <span class="log-status ${cls}">${r.status}</span>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-// ---------------------------------------------------------------------------
-// Run now
-// ---------------------------------------------------------------------------
-async function triggerRun() {
-  const threadId = document.getElementById('runThread').value;
-  const topic    = document.getElementById('runTopic').value.trim();
-  if (!threadId) { alert('Please select a thread to run.'); return; }
-
-  const btn = document.getElementById('runBtn');
-  const ind = document.getElementById('runIndicator');
-  const res = await fetch('/api/run', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({thread_id: threadId, topic: topic || null})
-  });
-  if (!res.ok) { alert((await res.json()).error); return; }
-  btn.disabled = true;
-  ind.classList.add('show');
-  startRunPolling();
-}
-
-function startRunPolling() {
-  if (_runPolling) clearInterval(_runPolling);
-  _runPolling = setInterval(pollRunStatus, 3000);
-}
-
-async function pollRunStatus() {
-  const s = await fetch('/api/run/status').then(r => r.json());
-  const btn = document.getElementById('runBtn');
-  const ind = document.getElementById('runIndicator');
-  if (s.running) {
-    btn.disabled = true;
-    ind.classList.add('show');
-  } else {
-    btn.disabled = false;
-    ind.classList.remove('show');
-    if (_runPolling) { clearInterval(_runPolling); _runPolling = null; }
-    loadRunLog();
-    loadThreads();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Bots / Agents
-// ---------------------------------------------------------------------------
-let _editingBotId = null;
-
-async function loadBots() {
-  const bots = await fetch('/api/bots').then(r => r.json());
-  const el = document.getElementById('agentsList');
-  if (!bots.length) { el.innerHTML = '<span style="color:#aaa;font-size:13px">No agents found.</span>'; return; }
-  el.innerHTML = bots.map(b => `
-    <div style="padding:14px 0;border-bottom:1px solid #f0f0ee" id="botPanel_${b.id}">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
-        <div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <span style="font-weight:600;font-size:14px">${b.name}</span>
-            <span class="auth-badge auth-unauth" id="authBadge_${b.id}">Loading...</span>
-          </div>
-        </div>
-        <div style="display:flex;gap:6px;flex-shrink:0">
-          <button class="btn btn-sm" id="authBtn_${b.id}" onclick="startAuth('${b.id}','${b.name}')">Authorize</button>
-          <button class="btn btn-sm" onclick="openPromptEditor('${b.id}','${b.name}')">Edit prompt</button>
-        </div>
-      </div>
-      <div class="field" style="padding:5px 0">
-        <span class="field-label">Email</span>
-        <input type="text" id="email_${b.id}" value="${b.email.replace(/"/g,'&quot;')}" style="width:260px">
-      </div>
-      <div class="field" style="padding:5px 0">
-        <span class="field-label">Role</span>
-        <input type="text" id="role_${b.id}" value="${b.role.replace(/"/g,'&quot;')}" style="width:260px">
-      </div>
-      <div class="field" style="padding:5px 0;border-bottom:none">
-        <span class="field-label">Style</span>
-        <input type="text" id="style_${b.id}" value="${b.style.replace(/"/g,'&quot;')}" style="width:260px">
-      </div>
-      <div style="text-align:right;margin-top:8px">
-        <button class="btn btn-primary btn-sm" onclick="saveBot('${b.id}')">Save</button>
-      </div>
-    </div>`).join('');
-}
-
-async function saveBot(botId) {
-  const email = document.getElementById(`email_${botId}`).value;
-  const role  = document.getElementById(`role_${botId}`).value;
-  const style = document.getElementById(`style_${botId}`).value;
-  await fetch(`/api/bots/${botId}`, {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({email, role, style})
-  });
-  const msg = document.getElementById('savedMsg');
-  msg.textContent = 'Saved';
-  msg.classList.add('show');
-  setTimeout(() => { msg.classList.remove('show'); msg.textContent = 'Saved'; }, 2000);
-}
-
-async function openPromptEditor(botId, botName) {
-  _editingBotId = botId;
-  const {content} = await fetch(`/api/prompts/${botId}`).then(r => r.json());
-  const escaped = content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  document.getElementById('promptContent').innerHTML = `
-    <h2 style="font-size:17px;font-weight:600;margin-bottom:4px">${botName} — Prompt Template</h2>
-    <p style="font-size:12px;color:#888;margin-bottom:14px">Full instructions that govern ${botName}'s writing style, role, and behavior in every email.</p>
-    <textarea id="promptTextarea" style="width:100%;min-height:420px;border:1px solid #ddd;border-radius:6px;padding:10px 12px;font-size:12px;font-family:monospace;line-height:1.6;resize:vertical;outline:none;color:#222">${escaped}</textarea>
-    <div style="text-align:right;margin-top:10px">
-      <button class="btn btn-primary" onclick="savePrompt()">Save prompt</button>
-    </div>`;
-  document.getElementById('promptOverlay').classList.add('open');
-}
-
-async function savePrompt() {
-  const content = document.getElementById('promptTextarea').value;
-  await fetch(`/api/prompts/${_editingBotId}`, {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({content})
-  });
-  const msg = document.getElementById('savedMsg');
-  msg.textContent = 'Prompt saved';
-  msg.classList.add('show');
-  setTimeout(() => { msg.classList.remove('show'); msg.textContent = 'Saved'; }, 2500);
-}
-
-function closePromptPanel() { document.getElementById('promptOverlay').classList.remove('open'); }
-function closePromptOverlay(e) { if (e.target === document.getElementById('promptOverlay')) closePromptPanel(); }
-
-// ---------------------------------------------------------------------------
-// New thread / delete thread
-// ---------------------------------------------------------------------------
-function openNewThread() {
-  document.getElementById('newThreadName').value = '';
-  document.getElementById('newThreadContent').value = '';
-  document.getElementById('newThreadStatus').textContent = '';
-  document.getElementById('newThreadBtn').disabled = false;
-  document.getElementById('newThreadOverlay').classList.add('open');
-}
-function closeNewThread() { document.getElementById('newThreadOverlay').classList.remove('open'); }
-function closeNewThreadOverlay(e) { if (e.target === document.getElementById('newThreadOverlay')) closeNewThread(); }
-
-async function createThread() {
-  const name    = document.getElementById('newThreadName').value.trim();
-  const content = document.getElementById('newThreadContent').value.trim();
-  if (!name || !content) { alert('Please fill in both the name and content.'); return; }
-
-  const btn = document.getElementById('newThreadBtn');
-  const status = document.getElementById('newThreadStatus');
-  btn.disabled = true;
-  status.textContent = '⏳ Claude is analyzing the content...';
-
-  const res = await fetch('/api/threads/new', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({name, content})
-  });
-  const data = await res.json();
-
-  if (!res.ok) {
-    status.textContent = '❌ ' + (data.error || 'Failed');
-    btn.disabled = false;
-    return;
-  }
-
-  status.textContent = '✓ Thread created!';
-  setTimeout(() => {
-    closeNewThread();
-    loadThreads();
-  }, 800);
-}
-
-async function deleteThread(tid) {
-  if (!confirm('Delete this thread? This cannot be undone.')) return;
-  await fetch(`/api/threads/${tid}`, {method: 'DELETE'});
-  closeDetailPanel();
-  loadThreads();
-}
-
-// ---------------------------------------------------------------------------
-// Outlook auth
-// ---------------------------------------------------------------------------
-let _authBotId  = null;
-let _authPolling = null;
-
-async function loadAuthStatus() {
-  for (const botId of ['bot_a', 'bot_b', 'bot_c']) {
-    try {
-      const d     = await fetch(`/api/auth/${botId}/status`).then(r => r.json());
-      const badge = document.getElementById(`authBadge_${botId}`);
-      const btn   = document.getElementById(`authBtn_${botId}`);
-      if (!badge) continue;
-
-      const ts = d.token_status;
-      const fs = d.flow_status;
-
-      if (fs === 'polling') {
-        badge.textContent = '⏳ Authorizing...';
-        badge.className   = 'auth-badge auth-pending';
-        if (btn) btn.style.display = 'none';
-      } else if (ts === 'connected') {
-        badge.textContent = '✓ Connected';
-        badge.className   = 'auth-badge auth-connected';
-        if (btn) btn.style.display = 'none';
-      } else if (ts === 'expired') {
-        badge.textContent = '⚠ Expired';
-        badge.className   = 'auth-badge auth-expired';
-        if (btn) { btn.style.display = ''; btn.textContent = 'Re-authorize'; }
-      } else {
-        badge.textContent = '✗ Not authorized';
-        badge.className   = 'auth-badge auth-unauth';
-        if (btn) { btn.style.display = ''; btn.textContent = 'Authorize'; }
-      }
-    } catch(_) {}
-  }
-}
-
-async function startAuth(botId, botName) {
-  _authBotId = botId;
-  _clearAuthPolling();
-
-  document.getElementById('authTitle').textContent    = `Authorize ${botName}`;
-  document.getElementById('authCode').textContent     = '...';
-  document.getElementById('authStatusMsg').textContent = '⏳ Starting authorization...';
-  document.getElementById('authExpiry').textContent   = '';
-  document.getElementById('authOverlay').classList.add('open');
-
-  try {
-    const res = await fetch(`/api/auth/${botId}/start`, {method: 'POST'});
-    const d   = await res.json();
-    if (!res.ok) {
-      document.getElementById('authStatusMsg').textContent = '❌ ' + (d.error || 'Failed');
-      return;
-    }
-    document.getElementById('authCode').textContent     = d.user_code;
-    document.getElementById('authStatusMsg').textContent = '⏳ Waiting for you to sign in...';
-    if (d.expires_in) {
-      const exp = new Date(Date.now() + d.expires_in * 1000);
-      document.getElementById('authExpiry').textContent = `Code expires at ${exp.toLocaleTimeString()}`;
-    }
-    _authPolling = setInterval(() => _pollAuth(botId), 4000);
-  } catch(e) {
-    document.getElementById('authStatusMsg').textContent = '❌ Network error — try again.';
-  }
-}
-
-async function _pollAuth(botId) {
-  try {
-    const d = await fetch(`/api/auth/${botId}/status`).then(r => r.json());
-    if (d.flow_status === 'connected' || d.token_status === 'connected') {
-      _clearAuthPolling();
-      document.getElementById('authStatusMsg').textContent = '✅ Successfully authorized!';
-      document.getElementById('authCode').textContent     = '✓';
-      setTimeout(() => { closeAuth(); loadAuthStatus(); }, 1500);
-    } else if (d.flow_status === 'failed') {
-      _clearAuthPolling();
-      document.getElementById('authStatusMsg').textContent = '❌ Sign-in failed or timed out. Try again.';
-    }
-  } catch(_) {}
-}
-
-function _clearAuthPolling() {
-  if (_authPolling) { clearInterval(_authPolling); _authPolling = null; }
-}
-function closeAuth() {
-  _clearAuthPolling();
-  document.getElementById('authOverlay').classList.remove('open');
-}
-function closeAuthOverlay(e) {
-  if (e.target === document.getElementById('authOverlay')) closeAuth();
-}
-
-// ---------------------------------------------------------------------------
-// Start
-// ---------------------------------------------------------------------------
 boot();
 </script>
 </body>
