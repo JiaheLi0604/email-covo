@@ -842,11 +842,20 @@ def api_chat():
         except Exception:
             pass
 
+    cfg_summary = (
+        f"Scheduler enabled: {cfg.get('enabled', True)} | "
+        f"Window (ET): {cfg.get('window_start','10:00')}–{cfg.get('window_end','17:00')} | "
+        f"Runs/day: {cfg.get('runs_per_day_min',2)}–{cfg.get('runs_per_day_max',3)} | "
+        f"Min gap: {cfg.get('min_gap_minutes',90)} min | "
+        f"Rounds per run: {cfg.get('rounds_min',3)}–{cfg.get('rounds_max',3)} | "
+        f"Email subject: {cfg.get('email_subject','')}"
+    )
     system = (
         "You are an AI assistant embedded in Cratus Asset Management's deal pipeline dashboard.\n"
         "You help the team understand and manage their real estate deal threads.\n\n"
+        "SCHEDULER CONFIG:\n" + cfg_summary + "\n\n"
         "CURRENT THREADS:\n" + ("\n".join(thread_lines) if thread_lines else "No threads yet.") + "\n\n"
-        "You can answer questions about any thread and modify thread data using tools.\n"
+        "You can answer questions about any thread, scheduler settings, and modify thread data using tools.\n"
         "When you make changes, briefly confirm what was done. Be concise and professional.\n"
         f"Today: {datetime.now().strftime('%Y-%m-%d')}"
     )
