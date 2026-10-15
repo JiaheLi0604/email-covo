@@ -306,7 +306,7 @@ CONTENT:
 
     client = _ant.Anthropic()
     msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-haiku-5-5",
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -860,7 +860,7 @@ CONTENT:
 {content[:4000]}"""
             client2 = _ant2.Anthropic()
             msg = client2.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-5-5",
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}]
             )
@@ -993,7 +993,7 @@ def api_chat():
 
         for _ in range(6):  # max 6 tool-call rounds
             response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-sonnet-5-5",
                 max_tokens=1024,
                 system=system,
                 tools=tools,
