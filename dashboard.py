@@ -812,6 +812,53 @@ def _execute_chat_tool(name: str, inp: dict) -> dict:
                 _save_thread(tid, t)
             return {"ok": True, "changed": changed, "action_summary": action_summary}
 
+        elif name == "create_thread":
+            thread_name = inp.get("name", "").strip()
+            content = inp.get("content", "").strip()
+            if not thread_name or not content:
+                return {"error": "name and content are required", "changed": False}
+            import anthropic as _ant2
+            tid = re.sub(r"[^a-z0-9]+", "_", thread_name.lower()).strip("_")
+            if (THREADS_DIR / f"{tid}.json").exists():
+                return {"error": f"Thread '{tid}' already exists", "changed": False}
+            prompt = f"""You are analyzing a real estate deal listing. Extract structured information and return a JSON object with EXACTLY these fields:
+
+{{
+  "thread_id": "{tid}",
+  "stage": "initial_review",
+  "discussion_focus": "<one sentence describing the main focus>",
+  "last_run_summary": "",
+  "known_facts": ["<fact1>", "<fact2>", ...],
+  "open_questions": [{{"question": "<question>", "resolved": false}}, ...],
+  "action_items": [{{"item": "<action>", "owner": "<Li|Brian|Joey Wan>", "status": "open"}}, ...],
+  "decisions": [],
+  "new_information": [],
+  "history": []
+}}
+
+Extract 5-15 known facts, 3-8 open questions, 2-5 action items. Return ONLY valid JSON.
+
+CONTENT:
+{content[:4000]}"""
+            client2 = _ant2.Anthropic()
+            msg = client2.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=2000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            raw = msg.content[0].text.strip()
+            raw = re.sub(r"^```(?:json)?\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+            thread_data = json.loads(raw)
+            THREADS_DIR.mkdir(exist_ok=True)
+            _save_thread(tid, thread_data)
+            cfg2 = _load_config()
+            if tid not in cfg2.get("active_threads", []):
+                cfg2.setdefault("active_threads", []).append(tid)
+                _save_config(cfg2)
+            return {"ok": True, "changed": True, "thread_id": tid,
+                    "action_summary": f"Created new thread '{thread_name}' ({tid})"}
+
         else:
             return {"error": f"Unknown tool: {name}", "changed": False}
 
@@ -875,6 +922,18 @@ def api_chat():
                     "thread_id": {"type": "string", "description": "The thread ID (e.g. washington_rv_park)"}
                 },
                 "required": ["thread_id"]
+            }
+        },
+        {
+            "name": "create_thread",
+            "description": "Create a new deal thread by providing a name and descriptive content (listing details, notes, etc.). Claude Haiku will auto-extract facts, questions, and actions from the content.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Human-readable thread name, e.g. 'Malibu Campground'"},
+                    "content": {"type": "string", "description": "Description, listing details, or notes about the deal. Can be a few sentences or a full listing."}
+                },
+                "required": ["name", "content"]
             }
         },
         {
