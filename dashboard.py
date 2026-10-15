@@ -497,6 +497,37 @@ def api_restore(tid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/threads/<tid>/chat_rollback/<int:index>", methods=["POST"])
+def api_chat_rollback(tid, index):
+    """Restore thread state to before chat_log[index] was applied."""
+    try:
+        t = _load_thread(tid)
+    except FileNotFoundError:
+        return jsonify({"error": "not found"}), 404
+
+    chat_log = t.get("chat_log", [])
+    if index < 0 or index >= len(chat_log):
+        return jsonify({"error": "invalid index"}), 400
+
+    snapshot = chat_log[index].get("snapshot_before")
+    if not snapshot:
+        return jsonify({"error": "No snapshot for this entry"}), 400
+
+    # Restore thread state from snapshot
+    for field in ["known_facts", "open_questions", "action_items", "decisions",
+                  "new_information", "last_run_summary", "discussion_focus"]:
+        if field in snapshot:
+            t[field] = snapshot[field]
+
+    # Mark this and subsequent chat_log entries as undone
+    for i in range(index, len(chat_log)):
+        chat_log[i]["undone"] = True
+    t["chat_log"] = chat_log
+
+    _save_thread(tid, t)
+    return jsonify({"ok": True})
+
+
 # ---------------------------------------------------------------------------
 # API — Outlook auth
 # ---------------------------------------------------------------------------
@@ -701,6 +732,18 @@ def _execute_chat_tool(name: str, inp: dict) -> dict:
             owner = inp.get("owner", "Li")
 
             t = _load_thread(tid)
+
+            # Capture snapshot before any change (for undo)
+            snapshot_before = {
+                "known_facts":      list(t.get("known_facts", [])),
+                "open_questions":   [q.copy() for q in t.get("open_questions", [])],
+                "action_items":     [a.copy() for a in t.get("action_items", [])],
+                "decisions":        list(t.get("decisions", [])),
+                "new_information":  list(t.get("new_information", [])),
+                "last_run_summary": t.get("last_run_summary", ""),
+                "discussion_focus": t.get("discussion_focus", ""),
+            }
+
             changed = False
             action_summary = ""
 
@@ -759,6 +802,13 @@ def _execute_chat_tool(name: str, inp: dict) -> dict:
                 changed = True; action_summary = f"Updated focus for {tid}: '{val}'"
 
             if changed:
+                # Append to chat_log for audit + undo
+                t.setdefault("chat_log", []).append({
+                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "op": op,
+                    "summary": action_summary,
+                    "snapshot_before": snapshot_before,
+                })
                 _save_thread(tid, t)
             return {"ok": True, "changed": changed, "action_summary": action_summary}
 
@@ -1503,6 +1553,12 @@ function renderDetail() {
     const ctrl=disc?'<span style="font-size:11px;color:#bbb">已弃用</span>':`<button class="btn btn-sm btn-danger" style="font-size:10px" onclick="rollback('${tid}',${i})">↺ 重新讨论</button>`;
     return `<div class="hist-entry ${disc?'discarded':''}"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div style="flex:1;min-width:0"><span style="font-size:12px;font-weight:600;color:${disc?'#aaa':'#333'}">Run ${h.run} · ${h.date}</span>${h.topic?`<span style="font-size:11px;color:#2563eb;margin-left:6px">${esc(h.topic)}</span>`:''} ${h.summary?`<div style="font-size:12px;color:#555;margin-top:3px">${esc(h.summary)}</div>`:''}</div><div style="flex-shrink:0;margin-left:8px">${ctrl}</div></div></div>`;
   }).join('');
+  const chatLog=(t.chat_log||[]);
+  const chatLogRows=chatLog.map((c,i)=>{
+    const undone=!!c.undone;
+    const ctrl=undone?'<span style="font-size:11px;color:#bbb">已撤销</span>':`<button class="btn btn-sm btn-danger" style="font-size:10px" onclick="chatRollback('${tid}',${i})">↺ 撤销</button>`;
+    return `<div class="hist-entry ${undone?'discarded':''}"><div style="display:flex;justify-content:space-between;align-items:center"><div style="flex:1;min-width:0"><span style="font-size:11px;color:#888">${esc(c.ts)}</span><div style="font-size:12px;color:${undone?'#bbb':'#333'};margin-top:2px">${esc(c.summary)}</div></div><div style="flex-shrink:0;margin-left:8px">${ctrl}</div></div></div>`;
+  }).join('');
   el.innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
       <h2 class="panel-title">${esc((t.thread_id||tid).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()))}</h2>
@@ -1523,6 +1579,7 @@ function renderDetail() {
       </div>
     </div>
     ${niHtml?`<div class="dp-section"><div class="dp-sec-title">New info queued</div>${niHtml}</div>`:''}
+    ${chatLog.length?`<div class="dp-divider"></div><div class="dp-section"><div class="dp-sec-title">💬 Chat changes</div><p style="font-size:11px;color:#aaa;margin-bottom:8px">Chatbot 做的修改。↺ 撤销该条及之后的所有修改。</p>${chatLogRows}</div>`:''}
     ${history.length?`<div class="dp-divider"></div><div class="dp-section"><div class="dp-sec-title">Run history</div><p style="font-size:11px;color:#aaa;margin-bottom:8px">↺ = 重新讨论 (回到该 run 之前). <strong>已发送邮件不受影响。</strong></p>${histRows}${hasBackup?`<div style="text-align:right;margin-top:6px"><button class="btn btn-sm" onclick="restoreThread('${tid}')">↩ 撤销回滚</button></div>`:''}</div>`:''}
     <div class="dp-divider"></div>
     <div class="dp-section">
@@ -1556,6 +1613,12 @@ async function restoreThread(tid){
   const res=await fetch('/api/threads/'+tid+'/restore',{method:'POST'});
   const d=await res.json();if(!res.ok){alert(d.error||'Failed');return;}
   _td=await fetch('/api/threads/'+tid).then(r=>r.json());renderDetail();
+}
+async function chatRollback(tid,index){
+  if(!confirm('撤销该条 chatbot 修改（及之后的所有修改），回到修改前状态？'))return;
+  const res=await fetch('/api/threads/'+tid+'/chat_rollback/'+index,{method:'POST'});
+  const d=await res.json();if(!res.ok){alert(d.error||'Failed');return;}
+  _td=await fetch('/api/threads/'+tid).then(r=>r.json());renderDetail();showSaved('已撤销');
 }
 
 // Active toggle
