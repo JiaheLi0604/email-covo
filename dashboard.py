@@ -817,6 +817,24 @@ def _execute_chat_tool(name: str, inp: dict) -> dict:
             content = inp.get("content", "").strip()
             if not thread_name or not content:
                 return {"error": "name and content are required", "changed": False}
+            # If content looks like a URL, fetch the page text first
+            if content.startswith("http://") or content.startswith("https://"):
+                try:
+                    import urllib.request as _ur
+                    import html as _html
+                    req = _ur.Request(content, headers={"User-Agent": "Mozilla/5.0"})
+                    with _ur.urlopen(req, timeout=10) as resp:
+                        raw_html = resp.read().decode("utf-8", errors="ignore")
+                    # Strip tags simply
+                    import re as _re2
+                    text = _re2.sub(r"<style[^>]*>.*?</style>", " ", raw_html, flags=_re2.DOTALL)
+                    text = _re2.sub(r"<script[^>]*>.*?</script>", " ", text, flags=_re2.DOTALL)
+                    text = _re2.sub(r"<[^>]+>", " ", text)
+                    text = _re2.sub(r"\s+", " ", text).strip()
+                    text = _html.unescape(text)
+                    content = f"Source URL: {content}\n\n{text[:6000]}"
+                except Exception as fetch_err:
+                    content = f"[Could not fetch URL: {fetch_err}] {content}"
             import anthropic as _ant2
             tid = re.sub(r"[^a-z0-9]+", "_", thread_name.lower()).strip("_")
             if (THREADS_DIR / f"{tid}.json").exists():
