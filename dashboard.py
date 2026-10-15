@@ -944,7 +944,7 @@ def api_chat():
         },
         {
             "name": "create_thread",
-            "description": "Create a new deal thread by providing a name and descriptive content (listing details, notes, etc.). Claude Haiku will auto-extract facts, questions, and actions from the content.",
+            "description": "Create a new deal thread. The 'content' field can be a URL (the backend will fetch the page automatically) or plain text with listing details/notes. Claude Haiku will auto-extract facts, questions, and actions.",
             "input_schema": {
                 "type": "object",
                 "properties": {
