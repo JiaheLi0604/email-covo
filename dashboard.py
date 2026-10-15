@@ -313,7 +313,7 @@ CONTENT:
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
-    raw = msg.content[0].text.strip()
+    raw = next((b.text for b in msg.content if getattr(b, 'type', '') == 'text'), '').strip()
     raw = re.sub(r"^```(?:json)?\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw)
 
@@ -867,7 +867,7 @@ CONTENT:
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}]
             )
-            raw = msg.content[0].text.strip()
+            raw = next((b.text for b in msg.content if getattr(b, 'type', '') == 'text'), '').strip()
             raw = re.sub(r"^```(?:json)?\n?", "", raw)
             raw = re.sub(r"\n?```$", "", raw)
             thread_data = json.loads(raw)
