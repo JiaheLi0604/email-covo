@@ -38,9 +38,12 @@ from flask import Flask, Response, jsonify, request
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).parent
-CONFIG_FILE = BASE_DIR / "config.json"
-THREADS_DIR = BASE_DIR / "threads"
-RUN_LOG_FILE = BASE_DIR / "run_log.json"
+# DATA_DIR: set to a Railway Volume mount path (e.g. /data) so files survive redeployment.
+# Falls back to the project directory for local dev.
+DATA_DIR = Path(os.environ.get("DATA_DIR", str(BASE_DIR)))
+CONFIG_FILE = DATA_DIR / "config.json"
+THREADS_DIR = DATA_DIR / "threads"
+RUN_LOG_FILE = DATA_DIR / "run_log.json"
 
 # ---------------------------------------------------------------------------
 # Auth constants (mirrors outlook_service.py)
