@@ -849,48 +849,65 @@ def api_chat():
         }
     ]
 
-    client = _ant.Anthropic()
-    loop_messages = list(messages)
-    final_text = ""
-    actions_taken = []
+    try:
+        client = _ant.Anthropic()
+        loop_messages = list(messages)
+        final_text = ""
+        actions_taken = []
 
-    for _ in range(6):  # max 6 tool-call rounds
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system=system,
-            tools=tools,
-            messages=loop_messages
-        )
+        for _ in range(6):  # max 6 tool-call rounds
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system=system,
+                tools=tools,
+                messages=loop_messages
+            )
 
-        if response.stop_reason == "end_turn":
-            for block in response.content:
-                if hasattr(block, "text"):
-                    final_text = block.text
-            break
+            if response.stop_reason == "end_turn":
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        final_text = block.text
+                break
 
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            loop_messages.append({"role": "assistant", "content": response.content})
-            for block in response.content:
-                if block.type == "tool_use":
-                    result = _execute_chat_tool(block.name, block.input)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result)
-                    })
-                    if result.get("changed"):
-                        actions_taken.append(result.get("action_summary", ""))
-            loop_messages.append({"role": "user", "content": tool_results})
-        else:
-            # Unknown stop reason — extract any text and bail
-            for block in response.content:
-                if hasattr(block, "text"):
-                    final_text = block.text
-            break
+            if response.stop_reason == "tool_use":
+                tool_results = []
+                # Convert SDK content blocks to dicts for the message history
+                asst_content = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        asst_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        })
+                    elif hasattr(block, "text"):
+                        asst_content.append({"type": "text", "text": block.text})
+                loop_messages.append({"role": "assistant", "content": asst_content})
 
-    return jsonify({"reply": final_text, "actions_taken": actions_taken})
+                for block in response.content:
+                    if block.type == "tool_use":
+                        result = _execute_chat_tool(block.name, block.input)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result),
+                        })
+                        if result.get("changed"):
+                            actions_taken.append(result.get("action_summary", ""))
+                loop_messages.append({"role": "user", "content": tool_results})
+            else:
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        final_text = block.text
+                break
+
+        return jsonify({"reply": final_text, "actions_taken": actions_taken})
+
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "detail": traceback.format_exc()[-500:]}), 500
 
 
 # ---------------------------------------------------------------------------
